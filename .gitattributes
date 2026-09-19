@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+# Python sources
+*.py text eol=lf
+*.pyi text eol=lf
+
+# Markdown / docs
+*.md text eol=lf
+*.txt text eol=lf
+
+# Binaries
+*.png binary
+*.pdf binary
+*.ico binary

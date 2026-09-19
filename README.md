@@ -33,6 +33,21 @@ python scripts/smoke_test.py
 
 ---
 
+## 打包為單一執行檔
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-dev.txt   # 加入 PyInstaller
+./build-exe.sh                        # 產出 dist/pdf-editor（單一檔案）
+./dist/pdf-editor                     # 直接執行
+```
+
+- `run.py` 是 PyInstaller 的進入點；一般開發仍用 `python -m app`。
+- `pdf-editor.spec` 已納入版本控制，可用 `.venv/bin/pyinstaller pdf-editor.spec` 重現相同建置。
+- 產物在 `dist/`（已被 `.gitignore` 排除），暫存檔與中間檔在 `build/`。
+
+---
+
 ## 功能一覽
 
 | # | 功能 | 說明 |
@@ -74,8 +89,12 @@ pdf-editor/
 ├── .gitignore
 ├── .gitattributes
 ├── AGENTS.md                  # OpenCode 專案指引
+├── build-exe.sh               # PyInstaller 打包腳本
+├── pdf-editor.spec            # PyInstaller spec（可重現建置）
 ├── requirements.txt
+├── requirements-dev.txt       # 開發相依（含 PyInstaller）
 ├── requirements.lock.txt      # 精確鎖定相依版本
+├── run.py                     # PyInstaller 進入點
 └── README.md
 ```
 

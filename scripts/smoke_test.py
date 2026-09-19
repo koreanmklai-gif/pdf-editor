@@ -59,6 +59,10 @@ def main() -> int:
     svc.crop_pages([1], CropBox(left=20, top=30, right=20, bottom=40))
     cb = svc._doc.load_page(1).cropbox  # noqa: SLF001
     assert cb.width < 595 and cb.height < 842
+    # Margins are defined relative to the media box in PyMuPDF coordinates
+    # (y grows downward): the top margin cuts the visual top edge (cb.y0)
+    # and the bottom margin cuts the visual bottom (cb.y1).
+    assert tuple(cb) == (20.0, 30.0, 575.0, 802.0), f"cropbox orientation: {tuple(cb)}"
     print(f"[OK] crop page 2 -> cropbox {tuple(cb)}")
 
     # 3b. page_cropbox reflects the current crop back as margins
@@ -68,6 +72,15 @@ def main() -> int:
     assert abs(box.right - 20) < 0.01, f"right={box.right}"
     assert abs(box.bottom - 40) < 0.01, f"bottom={box.bottom}"
     print(f"[OK] page_cropbox(1) -> ({box.left}, {box.top}, {box.right}, {box.bottom})")
+
+    # 3c. Full-page (media box) render and size ignore the existing crop.
+    w, h = svc.page_media_size(1)
+    assert (w, h) == (595.0, 842.0), f"media size: {(w, h)}"
+    mbox_png = svc.render_page_media_box(1, zoom=1.0)
+    assert mbox_png[:8] == b"\x89PNG\r\n\x1a\n", "media render not a PNG"
+    # The page's own crop must be intact after the temporary preview render.
+    assert tuple(svc._doc.load_page(1).cropbox) == (20.0, 30.0, 575.0, 802.0)  # noqa: SLF001
+    print(f"[OK] page_media_size / render_page_media_box (crop ignored, {len(mbox_png)} bytes)")
 
     # 4. Reorder: reverse
     svc.reorder_pages([4, 3, 2, 1, 0])

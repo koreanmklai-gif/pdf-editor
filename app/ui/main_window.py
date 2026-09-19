@@ -171,7 +171,7 @@ class MainWindow(QMainWindow):
         self.act_zoom_out.triggered.connect(self._on_zoom_out)
         tb.addAction(self.act_zoom_out)
 
-        self.act_zoom_in = QAction("縮大", self)
+        self.act_zoom_in = QAction("放大", self)
         self.act_zoom_in.setShortcut(QKeySequence("Ctrl++"))
         self.act_zoom_in.triggered.connect(self._on_zoom_in)
         tb.addAction(self.act_zoom_in)
@@ -537,11 +537,12 @@ class MainWindow(QMainWindow):
         idx = sel[0] if sel else 0
         if idx >= self.service.page_count:
             return
-        w, h = self.service.page_size(idx)
-        # Render the page so the dialog can draw the crop region on it.
+        w, h = self.service.page_media_size(idx)
+        # Render the full page (media box, unrotated) so the dialog's overlay
+        # maps to the same coordinate space crop_pages() applies margins in.
         pix = QPixmap()
         try:
-            data = self.service.render_page(idx, zoom=0.8, max_side=520)
+            data = self.service.render_page_media_box(idx, zoom=0.8, max_side=520)
             pix.loadFromData(QByteArray(data), "PNG")
         except Exception:  # noqa: BLE001
             pix = QPixmap()

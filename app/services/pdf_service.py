@@ -31,9 +31,9 @@ class CropBox:
     def as_rect(self, page: fitz.Page) -> fitz.Rect:
         mb = page.mediabox
         x0 = mb.x0 + self.left
-        y0 = mb.y0 + self.bottom
+        y0 = mb.y0 + self.top
         x1 = mb.x1 - self.right
-        y1 = mb.y1 - self.top
+        y1 = mb.y1 - self.bottom
         if x1 <= x0 or y1 <= y0:
             raise PdfError("裁剪範圍無效：邊界過大，頁面會變成空矩形。")
         return fitz.Rect(x0, y0, x1, y1)
@@ -186,10 +186,53 @@ class PdfService:
         pix = page.get_pixmap(matrix=mat, alpha=False)
         return pix.tobytes("png")
 
+    def render_page_media_box(
+        self,
+        index: int,
+        *,
+        zoom: float = 0.8,
+        max_side: Optional[int] = None,
+    ) -> bytes:
+        """Render the page's full, unrotated media box as PNG bytes.
+
+        Ignores any current cropbox/rotation so the crop dialog can draw its
+        overlay in the same coordinate space (media box) that margins are
+        defined against by :class:`CropBox`.
+        """
+        self._ensure_open()
+        self._ensure_index(index)
+        page = self._doc.load_page(index)  # type: ignore[union-attr]
+        saved_crop = page.cropbox
+        saved_rotation = page.rotation
+        try:
+            page.set_cropbox(page.mediabox)
+            if saved_rotation:
+                page.set_rotation(0)
+            mat = fitz.Matrix(zoom, zoom)
+            rect = page.rect
+            if max_side is not None:
+                longest = max(rect.width, rect.height) * zoom
+                if longest > max_side and longest > 0:
+                    scale = max_side / longest
+                    mat = fitz.Matrix(zoom * scale, zoom * scale)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            return pix.tobytes("png")
+        finally:
+            if saved_rotation:
+                page.set_rotation(saved_rotation)
+            page.set_cropbox(saved_crop)
+
     def page_size(self, index: int) -> Tuple[float, float]:
         self._ensure_open()
         self._ensure_index(index)
         r = self._doc.load_page(index).rect  # type: ignore[union-attr]
+        return float(r.width), float(r.height)
+
+    def page_media_size(self, index: int) -> Tuple[float, float]:
+        """Return the page's media box size in points (unrotated)."""
+        self._ensure_open()
+        self._ensure_index(index)
+        r = self._doc.load_page(index).mediabox  # type: ignore[union-attr]
         return float(r.width), float(r.height)
 
     def page_cropbox(self, index: int) -> CropBox:
@@ -201,9 +244,9 @@ class PdfService:
         cb = page.cropbox
         return CropBox(
             left=cb.x0 - mb.x0,
-            top=mb.y1 - cb.y1,
+            top=cb.y0 - mb.y0,
             right=mb.x1 - cb.x1,
-            bottom=cb.y0 - mb.y0,
+            bottom=mb.y1 - cb.y1,
         )
 
     # ------------------------------------------------------------------

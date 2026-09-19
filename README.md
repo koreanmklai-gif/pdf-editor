@@ -30,6 +30,7 @@ python scripts/smoke_test.py
 | `/setup` | 建立 `.venv` 並安裝相依套件 |
 | `/run` | 啟動圖形介面（需要顯示環境） |
 | `/test` | 執行無頭煙霧測試 |
+| `/build` | 以 PyInstaller 打包為單一執行檔 |
 
 ---
 
@@ -72,7 +73,7 @@ pip install -r requirements-dev.txt   # 加入 PyInstaller
 ```
 pdf-editor/
 ├── .opencode/
-│   ├── commands/             # /setup、/run、/test 斜線指令
+│   ├── commands/             # /setup、/run、/test、/build 斜線指令
 │   └── skills/
 │       └── pdf-editor-dev/   # 專案開發技能（SKILL.md）
 ├── app/

@@ -192,6 +192,20 @@ class PdfService:
         r = self._doc.load_page(index).rect  # type: ignore[union-attr]
         return float(r.width), float(r.height)
 
+    def page_cropbox(self, index: int) -> CropBox:
+        """Return the page's current crop as margin values (relative to media box)."""
+        self._ensure_open()
+        self._ensure_index(index)
+        page = self._doc.load_page(index)  # type: ignore[union-attr]
+        mb = page.mediabox
+        cb = page.cropbox
+        return CropBox(
+            left=cb.x0 - mb.x0,
+            top=mb.y1 - cb.y1,
+            right=mb.x1 - cb.x1,
+            bottom=cb.y0 - mb.y0,
+        )
+
     # ------------------------------------------------------------------
     # Page operations
     # ------------------------------------------------------------------

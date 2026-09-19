@@ -2,33 +2,29 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QByteArray, QTimer
+from PySide6.QtCore import Qt, QByteArray
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
     QKeySequence,
     QPixmap,
-    QShortcut,
 )
 from PySide6.QtWidgets import (
-    QApplication,
     QFileDialog,
-    QHBoxLayout,
     QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QStatusBar,
     QToolBar,
     QVBoxLayout,
     QWidget,
-    QPushButton,
 )
 
 from app.services.pdf_service import CropBox, PdfError, PdfService
@@ -46,6 +42,7 @@ class MainWindow(QMainWindow):
         self._preview_index: int = 0
         self._thumb_cache_zoom = 0.35
         self._preview_zoom = 1.5
+        self._sidebar_last_w = 210
 
         self._build_ui()
         self._build_toolbar()
@@ -64,7 +61,17 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(6)
 
-        # Center preview
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+
+        # Left: thumbnail sidebar (vertical)
+        self.thumbs = ThumbnailList()
+        self.thumbs.selection_changed_custom.connect(self._on_selection_changed)
+        self.thumbs.pages_reordered.connect(self._on_pages_reordered)
+        self.thumbs.page_activated.connect(self._show_preview)
+        self.splitter.addWidget(self.thumbs)
+
+        # Right: center preview
         self.preview_scroll = QScrollArea()
         self.preview_scroll.setWidgetResizable(True)
         self.preview_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -78,28 +85,12 @@ class MainWindow(QMainWindow):
             "QLabel { background: #3a3a3a; color: #ddd; border: 1px solid #555; }"
         )
         self.preview_scroll.setWidget(self.preview_label)
-        root.addWidget(self.preview_scroll, stretch=1)
+        self.splitter.addWidget(self.preview_scroll)
 
-        # Bottom: move buttons + thumbnail strip
-        bottom = QHBoxLayout()
-        btn_col = QVBoxLayout()
-        self.btn_up = QPushButton("上移 ▲")
-        self.btn_down = QPushButton("下移 ▼")
-        self.btn_up.setToolTip("將選取頁面上移")
-        self.btn_down.setToolTip("將選取頁面下移")
-        self.btn_up.clicked.connect(self._on_move_up)
-        self.btn_down.clicked.connect(self._on_move_down)
-        btn_col.addWidget(self.btn_up)
-        btn_col.addWidget(self.btn_down)
-        btn_col.addStretch()
-        bottom.addLayout(btn_col)
-
-        self.thumbs = ThumbnailList()
-        self.thumbs.selection_changed_custom.connect(self._on_selection_changed)
-        self.thumbs.pages_reordered.connect(self._on_pages_reordered)
-        self.thumbs.page_activated.connect(self._show_preview)
-        bottom.addWidget(self.thumbs, stretch=1)
-        root.addLayout(bottom)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([self._sidebar_last_w, 800])
+        root.addWidget(self.splitter)
 
         self.setStatusBar(QStatusBar())
 
@@ -156,6 +147,54 @@ class MainWindow(QMainWindow):
         self.act_merge.triggered.connect(self._on_merge)
         tb.addAction(self.act_merge)
 
+        tb.addSeparator()
+
+        self.act_move_up = QAction("上移 ▲", self)
+        self.act_move_up.setToolTip("將選取頁面上移")
+        self.act_move_up.triggered.connect(self._on_move_up)
+        tb.addAction(self.act_move_up)
+
+        self.act_move_down = QAction("下移 ▼", self)
+        self.act_move_down.setToolTip("將選取頁面下移")
+        self.act_move_down.triggered.connect(self._on_move_down)
+        tb.addAction(self.act_move_down)
+
+        # Spacer: push zoom + sidebar controls to the right
+        spacer = QWidget()
+        spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        tb.addWidget(spacer)
+
+        self.act_zoom_out = QAction("縮小", self)
+        self.act_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
+        self.act_zoom_out.triggered.connect(self._on_zoom_out)
+        tb.addAction(self.act_zoom_out)
+
+        self.act_zoom_in = QAction("縮大", self)
+        self.act_zoom_in.setShortcut(QKeySequence("Ctrl++"))
+        self.act_zoom_in.triggered.connect(self._on_zoom_in)
+        tb.addAction(self.act_zoom_in)
+
+        self.act_zoom_actual = QAction("100%", self)
+        self.act_zoom_actual.setShortcut(QKeySequence("Ctrl+0"))
+        self.act_zoom_actual.triggered.connect(self._on_zoom_actual)
+        tb.addAction(self.act_zoom_actual)
+
+        self.act_zoom_fit = QAction("適合視窗", self)
+        self.act_zoom_fit.setShortcut(QKeySequence("Ctrl+Shift+F"))
+        self.act_zoom_fit.triggered.connect(self._on_zoom_fit)
+        tb.addAction(self.act_zoom_fit)
+
+        tb.addSeparator()
+
+        self.act_sidebar = QAction("縮圖側欄", self)
+        self.act_sidebar.setCheckable(True)
+        self.act_sidebar.setChecked(True)
+        self.act_sidebar.setShortcut(QKeySequence("Ctrl+B"))
+        self.act_sidebar.triggered.connect(self._toggle_sidebar)
+        tb.addAction(self.act_sidebar)
+
     def _build_menus(self) -> None:
         menu_file = self.menuBar().addMenu("檔案(&F)")
         menu_file.addAction(self.act_open)
@@ -177,6 +216,17 @@ class MainWindow(QMainWindow):
         menu_edit.addSeparator()
         menu_edit.addAction(self.act_extract)
         menu_edit.addAction(self.act_merge)
+        menu_edit.addSeparator()
+        menu_edit.addAction(self.act_move_up)
+        menu_edit.addAction(self.act_move_down)
+
+        menu_view = self.menuBar().addMenu("檢視(&V)")
+        menu_view.addAction(self.act_zoom_in)
+        menu_view.addAction(self.act_zoom_out)
+        menu_view.addAction(self.act_zoom_actual)
+        menu_view.addAction(self.act_zoom_fit)
+        menu_view.addSeparator()
+        menu_view.addAction(self.act_sidebar)
 
         menu_help = self.menuBar().addMenu("說明(&H)")
         act_about = QAction("關於", self)
@@ -235,8 +285,8 @@ class MainWindow(QMainWindow):
         ):
             a.setEnabled(opened and sel)
         self.act_merge.setEnabled(opened)
-        self.btn_up.setEnabled(opened and sel)
-        self.btn_down.setEnabled(opened and sel)
+        self.act_move_up.setEnabled(opened and sel)
+        self.act_move_down.setEnabled(opened and sel)
 
     def _refresh_ui(self, *, keep_selection: Optional[List[int]] = None) -> None:
         if not self.service.is_open:
@@ -287,7 +337,9 @@ class MainWindow(QMainWindow):
             return
         self._preview_index = index
         try:
-            data = self.service.render_page(index, zoom=self._preview_zoom, max_side=1200)
+            data = self.service.render_page(
+                index, zoom=self._preview_zoom, max_side=None
+            )
             pix = QPixmap()
             pix.loadFromData(QByteArray(data), "PNG")
             self.preview_label.setPixmap(pix)
@@ -295,6 +347,65 @@ class MainWindow(QMainWindow):
             self.preview_label.adjustSize()
         except Exception as exc:  # noqa: BLE001
             self.preview_label.setText(f"預覽失敗：{exc}")
+
+    # ------------------------------------------------------------------
+    # Zoom + sidebar
+    # ------------------------------------------------------------------
+
+    ZOOM_STEP = 1.25
+    ZOOM_MIN = 0.1
+    ZOOM_MAX = 8.0
+
+    def _on_zoom_in(self) -> None:
+        if not self.service.is_open:
+            return
+        self._preview_zoom = min(
+            self.ZOOM_MAX, self._preview_zoom * self.ZOOM_STEP
+        )
+        self._show_preview(self._preview_index)
+
+    def _on_zoom_out(self) -> None:
+        if not self.service.is_open:
+            return
+        self._preview_zoom = max(
+            self.ZOOM_MIN, self._preview_zoom / self.ZOOM_STEP
+        )
+        self._show_preview(self._preview_index)
+
+    def _on_zoom_actual(self) -> None:
+        if not self.service.is_open:
+            return
+        self._preview_zoom = 1.0
+        self._show_preview(self._preview_index)
+
+    def _on_zoom_fit(self) -> None:
+        if not self.service.is_open:
+            return
+        idx = self._preview_index
+        w_pt, h_pt = self.service.page_size(idx)
+        vw = self.preview_scroll.viewport().width()
+        vh = self.preview_scroll.viewport().height()
+        if w_pt <= 0 or h_pt <= 0 or vw <= 0 or vh <= 0:
+            return
+        margin = 24
+        self._preview_zoom = max(
+            self.ZOOM_MIN,
+            min((vw - margin) / w_pt, (vh - margin) / h_pt),
+        )
+        self._show_preview(idx)
+
+    def _toggle_sidebar(self, checked: bool) -> None:
+        if checked:
+            self.thumbs.setVisible(True)
+            self.splitter.setSizes(
+                [
+                    self._sidebar_last_w,
+                    max(200, self.splitter.width() - self._sidebar_last_w),
+                ]
+            )
+        else:
+            self._sidebar_last_w = self.thumbs.width()
+            self.thumbs.setVisible(False)
 
     def _on_selection_changed(self, indices: List[int]) -> None:
         self._update_actions_enabled()
@@ -420,19 +531,60 @@ class MainWindow(QMainWindow):
         self._refresh_ui(keep_selection=keep)
 
     def _on_crop(self) -> None:
-        sel = self._require_selection()
-        if sel is None:
+        if not self.service.is_open:
             return
-        w, h = self.service.page_size(sel[0])
-        dlg = CropDialog(self, page_width=w, page_height=h)
+        sel = self._selected()
+        idx = sel[0] if sel else 0
+        if idx >= self.service.page_count:
+            return
+        w, h = self.service.page_size(idx)
+        # Render the page so the dialog can draw the crop region on it.
+        pix = QPixmap()
+        try:
+            data = self.service.render_page(idx, zoom=0.8, max_side=520)
+            pix.loadFromData(QByteArray(data), "PNG")
+        except Exception:  # noqa: BLE001
+            pix = QPixmap()
+        try:
+            box = self.service.page_cropbox(idx)
+        except Exception:  # noqa: BLE001
+            box = None
+        dlg = CropDialog(
+            self,
+            page_width=w,
+            page_height=h,
+            page_pixmap=pix,
+            selection_count=len(sel),
+            initial_box=box,
+        )
         if dlg.exec() != CropDialog.DialogCode.Accepted:
             return
+        indices = self._resolve_crop_scope(dlg.scope(), sel)
+        if indices is None:
+            return
         try:
-            self.service.crop_pages(sel, dlg.crop_box())
+            self.service.crop_pages(indices, dlg.crop_box())
         except PdfError as exc:
             self._error(str(exc))
             return
         self._refresh_ui(keep_selection=sel)
+
+    def _resolve_crop_scope(
+        self, scope: str, selection: List[int]
+    ) -> Optional[List[int]]:
+        n = self.service.page_count
+        if scope == "all":
+            return list(range(n))
+        if scope == "odd":
+            return list(range(0, n, 2))
+        if scope == "even":
+            return list(range(1, n, 2))
+        if scope == "selected":
+            if not selection:
+                self._info("請先在縮圖列選取一或多個頁面。")
+                return None
+            return sorted(selection)
+        return None
 
     def _on_rotate(self, degrees: int) -> None:
         sel = self._require_selection()

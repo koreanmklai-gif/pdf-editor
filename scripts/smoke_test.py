@@ -61,6 +61,14 @@ def main() -> int:
     assert cb.width < 595 and cb.height < 842
     print(f"[OK] crop page 2 -> cropbox {tuple(cb)}")
 
+    # 3b. page_cropbox reflects the current crop back as margins
+    box = svc.page_cropbox(1)
+    assert abs(box.left - 20) < 0.01, f"left={box.left}"
+    assert abs(box.top - 30) < 0.01, f"top={box.top}"
+    assert abs(box.right - 20) < 0.01, f"right={box.right}"
+    assert abs(box.bottom - 40) < 0.01, f"bottom={box.bottom}"
+    print(f"[OK] page_cropbox(1) -> ({box.left}, {box.top}, {box.right}, {box.bottom})")
+
     # 4. Reorder: reverse
     svc.reorder_pages([4, 3, 2, 1, 0])
     assert_eq(svc.page_count, 5)

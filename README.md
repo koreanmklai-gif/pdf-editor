@@ -53,14 +53,16 @@ pip install -r requirements-dev.txt   # 加入 PyInstaller
 
 | # | 功能 | 說明 |
 |---|------|------|
-| 1 | 檢視／預覽 | 開啟 PDF、底部縮圖列 + 中央頁面預覽 |
+| 1 | 檢視／預覽 | 開啟 PDF、左側縮圖側欄（可收合）＋中央頁面預覽 |
 | 2 | 多選頁面 | 滑鼠點選、Shift 範圍、Ctrl/Cmd 切換 |
 | 3 | 刪除頁面 | 刪除選取頁（確認對話框） |
-| 4 | 裁剪 | 對話框輸入四邊邊界（pt），以 PyMuPDF 套用 cropbox |
+| 4 | 裁剪 | 對話框內即時預覽裁剪範圍（可拖曳四邊），可套用至全部／單數／雙數／選取頁面 |
 | 5 | 旋轉 | 順時針 90°、逆時針 90°、180° |
 | 6 | 匯出 | 將選取頁另存為新 PDF |
 | 7 | 排序 | 拖放縮圖，或「上移／下移」按鈕 |
 | 8 | 合併 | 開啟另一 PDF，附加到結尾或插入指定位置 |
+| 9 | 預覽縮放 | 縮小／放大／100%（Ctrl+0）／適合視窗（Ctrl+Shift+F） |
+| — | 側欄 | 縮圖側欄可拖曳調整寬度，或以 Ctrl+B 收合／展開 |
 | — | 檔案 | 開啟、儲存、另存新檔；髒旗標（未儲存標記 `*`） |
 | — | 錯誤處理 | 找不到檔案、損毀、加密 PDF 有明確提示 |
 
@@ -110,6 +112,6 @@ cd <this-project-dir> && python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && python -m app
 ```
 
-**Features:** view + thumbnails, multi-select, delete, crop, rotate (90/180), extract pages, reorder (drag or buttons), merge (append/insert), Open/Save/Save As, dirty flag, errors for missing/corrupt/encrypted PDFs.
+**Features:** vertical thumbnail sidebar (collapsible, resizable), center preview with zoom (in/out/100%/fit-to-window), multi-select, delete, crop (live preview + drag margins + scope: all/odd/even/selected), rotate (90/180), extract pages, reorder (drag or buttons), merge (append/insert), Open/Save/Save As, dirty flag, errors for missing/corrupt/encrypted PDFs.
 
 **Headless check:** `python scripts/smoke_test.py` exercises the same `PdfService` layer.

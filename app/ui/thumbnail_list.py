@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Set
+from typing import List, Optional
 
-from PySide6.QtCore import Qt, Signal, QSize, QMimeData, QByteArray
-from PySide6.QtGui import QPixmap, QIcon, QDrag, QPainter, QColor, QPen, QFont
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QAbstractItemView,
     QWidget,
 )
-
-
-MIME_TYPE = "application/x-pdf-editor-pages"
 
 
 class ThumbnailList(QListWidget):
@@ -27,7 +24,7 @@ class ThumbnailList(QListWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setViewMode(QListWidget.ViewMode.IconMode)
-        self.setFlow(QListWidget.Flow.LeftToRight)
+        self.setFlow(QListWidget.Flow.TopToBottom)
         self.setWrapping(False)
         self.setMovement(QListWidget.Movement.Snap)
         self.setResizeMode(QListWidget.ResizeMode.Adjust)
@@ -40,10 +37,10 @@ class ThumbnailList(QListWidget):
         self.setDropIndicatorShown(True)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setMaximumHeight(190)
-        self.setMinimumHeight(160)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setMinimumWidth(168)
+        self.setMaximumWidth(240)
 
         self.itemSelectionChanged.connect(self._emit_selection)
         self.itemDoubleClicked.connect(self._on_double_click)

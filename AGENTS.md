@@ -1,6 +1,6 @@
 # PDF Editor — Agent Instructions
 
-Lightweight desktop PDF page editor (view, multi-select, delete, crop, rotate, extract, reorder, merge) built with Python 3.11+, PySide6, and PyMuPDF. All user-facing UI text is Traditional Chinese.
+Lightweight desktop PDF page editor (view, multi-select, delete, crop, rotate, extract, reorder, merge) built with Python 3.11+, PySide6, and PyMuPDF. All user-facing UI text is English.
 
 ## Commands
 
@@ -16,8 +16,8 @@ Lightweight desktop PDF page editor (view, multi-select, delete, crop, rotate, e
 
 ## Conventions
 
-- Raise user-facing failures as `PdfError` with a Traditional Chinese message.
-- User-facing strings are Traditional Chinese (港／台式用語).
+- Raise user-facing failures as `PdfError` with a clear English message.
+- User-facing strings are English.
 - Type hints everywhere; start modules with `from __future__ import annotations`.
 - Dependency pins in `requirements.txt`; exact build in `requirements.lock.txt`.
 

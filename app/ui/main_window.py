@@ -1,9 +1,9 @@
-"""Main application window — Traditional Chinese UI."""
+"""Main application window."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QByteArray
 from PySide6.QtGui import (
@@ -13,9 +13,9 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QInputDialog,
-    QLabel,
     QMainWindow,
     QMessageBox,
     QScrollArea,
@@ -29,26 +29,36 @@ from PySide6.QtWidgets import (
 
 from app.services.pdf_service import CropBox, PdfError, PdfService
 from app.ui.crop_dialog import CropDialog
+from app.ui.delete_dialog import DeleteDialog
+from app.ui.extract_dialog import ExtractDialog
+from app.ui.merge_dialog import MergeDialog
+from app.ui.preview_label import PreviewLabel
+from app.ui.reorder_dialog import ReorderDialog
+from app.ui.rotate_dialog import RotateDialog
+from app.ui.scope_selector import resolve_scope
 from app.ui.thumbnail_list import ThumbnailList
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("PDF 編輯器")
+        self.setWindowTitle("PDF Editor")
         self.resize(1100, 750)
+        self.setMinimumSize(1100, 750)
 
         self.service = PdfService()
         self._preview_index: int = 0
         self._thumb_cache_zoom = 0.35
         self._preview_zoom = 1.5
         self._sidebar_last_w = 210
+        self._crop_overlay: Optional[Tuple[float, float, float, float]] = None
+        self._crop_dialog: Optional[CropDialog] = None
 
         self._build_ui()
         self._build_toolbar()
         self._build_menus()
         self._update_actions_enabled()
-        self.statusBar().showMessage("請開啟 PDF 檔案")
+        self.statusBar().showMessage("Please open a PDF file")
 
     # ------------------------------------------------------------------
     # UI construction
@@ -73,9 +83,12 @@ class MainWindow(QMainWindow):
 
         # Right: center preview
         self.preview_scroll = QScrollArea()
-        self.preview_scroll.setWidgetResizable(True)
+        self.preview_scroll.setWidgetResizable(False)
         self.preview_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label = QLabel("尚未開啟 PDF")
+        self.preview_scroll.viewport().setStyleSheet(
+            "background: #3a3a3a; border: none;"
+        )
+        self.preview_label = PreviewLabel("No PDF opened")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumSize(400, 500)
         self.preview_label.setSizePolicy(
@@ -95,100 +108,94 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
 
     def _build_toolbar(self) -> None:
-        tb = QToolBar("主工具列")
+        tb = QToolBar("Main Toolbar")
         tb.setMovable(False)
+        tb.setFloatable(False)
         self.addToolBar(tb)
 
-        self.act_open = QAction("開啟", self)
+        # ---- Left set: page tools ----
+        self.act_open = QAction("Open", self)
         self.act_open.setShortcut(QKeySequence.StandardKey.Open)
         self.act_open.triggered.connect(self._on_open)
         tb.addAction(self.act_open)
 
-        self.act_save = QAction("儲存", self)
+        self.act_save = QAction("Save", self)
         self.act_save.setShortcut(QKeySequence.StandardKey.Save)
         self.act_save.triggered.connect(self._on_save)
         tb.addAction(self.act_save)
 
-        self.act_save_as = QAction("另存新檔", self)
+        self.act_save_as = QAction("Save As", self)
         self.act_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         self.act_save_as.triggered.connect(self._on_save_as)
-        tb.addAction(self.act_save_as)
 
         tb.addSeparator()
 
-        self.act_delete = QAction("刪除頁面", self)
-        self.act_delete.setShortcut(QKeySequence.StandardKey.Delete)
+        self.act_delete = QAction("Delete", self)
         self.act_delete.triggered.connect(self._on_delete)
         tb.addAction(self.act_delete)
 
-        self.act_crop = QAction("裁剪", self)
+        self.act_crop = QAction("Crop", self)
         self.act_crop.triggered.connect(self._on_crop)
         tb.addAction(self.act_crop)
 
-        self.act_rot_cw = QAction("順時針 90°", self)
-        self.act_rot_cw.triggered.connect(lambda: self._on_rotate(90))
-        tb.addAction(self.act_rot_cw)
+        self.act_rotate = QAction("Rotate", self)
+        self.act_rotate.triggered.connect(self._on_rotate)
+        tb.addAction(self.act_rotate)
 
-        self.act_rot_ccw = QAction("逆時針 90°", self)
-        self.act_rot_ccw.triggered.connect(lambda: self._on_rotate(-90))
-        tb.addAction(self.act_rot_ccw)
-
-        self.act_rot_180 = QAction("旋轉 180°", self)
-        self.act_rot_180.triggered.connect(lambda: self._on_rotate(180))
-        tb.addAction(self.act_rot_180)
-
-        tb.addSeparator()
-
-        self.act_extract = QAction("匯出選取頁", self)
+        self.act_extract = QAction("Extract", self)
         self.act_extract.triggered.connect(self._on_extract)
         tb.addAction(self.act_extract)
 
-        self.act_merge = QAction("合併 PDF", self)
+        self.act_merge = QAction("Merge", self)
         self.act_merge.triggered.connect(self._on_merge)
         tb.addAction(self.act_merge)
 
-        tb.addSeparator()
+        self.act_reorder = QAction("Reorder", self)
+        self.act_reorder.triggered.connect(self._on_reorder)
+        tb.addAction(self.act_reorder)
 
-        self.act_move_up = QAction("上移 ▲", self)
-        self.act_move_up.setToolTip("將選取頁面上移")
-        self.act_move_up.triggered.connect(self._on_move_up)
-        tb.addAction(self.act_move_up)
-
-        self.act_move_down = QAction("下移 ▼", self)
-        self.act_move_down.setToolTip("將選取頁面下移")
-        self.act_move_down.triggered.connect(self._on_move_down)
-        tb.addAction(self.act_move_down)
-
-        # Spacer: push zoom + sidebar controls to the right
+        # Spacer: push the zoom + sidebar controls to the right
         spacer = QWidget()
         spacer.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         tb.addWidget(spacer)
 
-        self.act_zoom_out = QAction("縮小", self)
-        self.act_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
-        self.act_zoom_out.triggered.connect(self._on_zoom_out)
-        tb.addAction(self.act_zoom_out)
-
-        self.act_zoom_in = QAction("放大", self)
+        # ---- Right set: zoom + sidebar ----
+        self.act_zoom_in = QAction("Zoom In", self)
         self.act_zoom_in.setShortcut(QKeySequence("Ctrl++"))
         self.act_zoom_in.triggered.connect(self._on_zoom_in)
         tb.addAction(self.act_zoom_in)
 
+        self.act_zoom_out = QAction("Zoom Out", self)
+        self.act_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
+        self.act_zoom_out.triggered.connect(self._on_zoom_out)
+        tb.addAction(self.act_zoom_out)
+
+        self.zoom_combo = QComboBox()
+        self.zoom_combo.addItem("100%")
+        self.zoom_combo.addItem("Fit page")
+        self.zoom_combo.addItem("Fit width")
+        self.zoom_combo.setToolTip("Zoom preset")
+        self.zoom_combo.currentIndexChanged.connect(self._on_zoom_combo_changed)
+        tb.addWidget(self.zoom_combo)
+
+        # Zoom presets used by the View menu and shortcuts (not on the toolbar)
         self.act_zoom_actual = QAction("100%", self)
         self.act_zoom_actual.setShortcut(QKeySequence("Ctrl+0"))
         self.act_zoom_actual.triggered.connect(self._on_zoom_actual)
-        tb.addAction(self.act_zoom_actual)
 
-        self.act_zoom_fit = QAction("適合視窗", self)
+        self.act_zoom_fit = QAction("Fit Page", self)
         self.act_zoom_fit.setShortcut(QKeySequence("Ctrl+Shift+F"))
         self.act_zoom_fit.triggered.connect(self._on_zoom_fit)
-        tb.addAction(self.act_zoom_fit)
+
+        self.act_zoom_fit_width = QAction("Fit Width", self)
+        self.act_zoom_fit_width.setShortcut(QKeySequence("Ctrl+Shift+W"))
+        self.act_zoom_fit_width.triggered.connect(self._on_zoom_fit_width)
 
         tb.addSeparator()
 
-        self.act_sidebar = QAction("縮圖側欄", self)
+        self.act_sidebar = QAction("Thumbnail Sidebar", self)
         self.act_sidebar.setCheckable(True)
         self.act_sidebar.setChecked(True)
         self.act_sidebar.setShortcut(QKeySequence("Ctrl+B"))
@@ -196,40 +203,38 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_sidebar)
 
     def _build_menus(self) -> None:
-        menu_file = self.menuBar().addMenu("檔案(&F)")
+        menu_file = self.menuBar().addMenu("&File")
         menu_file.addAction(self.act_open)
         menu_file.addAction(self.act_save)
         menu_file.addAction(self.act_save_as)
         menu_file.addSeparator()
-        act_quit = QAction("結束", self)
+        act_quit = QAction("Quit", self)
         act_quit.setShortcut(QKeySequence.StandardKey.Quit)
         act_quit.triggered.connect(self.close)
         menu_file.addAction(act_quit)
 
-        menu_edit = self.menuBar().addMenu("編輯(&E)")
+        menu_edit = self.menuBar().addMenu("&Edit")
         menu_edit.addAction(self.act_delete)
         menu_edit.addAction(self.act_crop)
         menu_edit.addSeparator()
-        menu_edit.addAction(self.act_rot_cw)
-        menu_edit.addAction(self.act_rot_ccw)
-        menu_edit.addAction(self.act_rot_180)
+        menu_edit.addAction(self.act_rotate)
         menu_edit.addSeparator()
         menu_edit.addAction(self.act_extract)
         menu_edit.addAction(self.act_merge)
         menu_edit.addSeparator()
-        menu_edit.addAction(self.act_move_up)
-        menu_edit.addAction(self.act_move_down)
+        menu_edit.addAction(self.act_reorder)
 
-        menu_view = self.menuBar().addMenu("檢視(&V)")
+        menu_view = self.menuBar().addMenu("&View")
         menu_view.addAction(self.act_zoom_in)
         menu_view.addAction(self.act_zoom_out)
         menu_view.addAction(self.act_zoom_actual)
         menu_view.addAction(self.act_zoom_fit)
+        menu_view.addAction(self.act_zoom_fit_width)
         menu_view.addSeparator()
         menu_view.addAction(self.act_sidebar)
 
-        menu_help = self.menuBar().addMenu("說明(&H)")
-        act_about = QAction("關於", self)
+        menu_help = self.menuBar().addMenu("&Help")
+        act_about = QAction("About", self)
         act_about.triggered.connect(self._on_about)
         menu_help.addAction(act_about)
 
@@ -237,13 +242,13 @@ class MainWindow(QMainWindow):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _error(self, message: str, title: str = "錯誤") -> None:
+    def _error(self, message: str, title: str = "Error") -> None:
         QMessageBox.critical(self, title, message)
 
-    def _info(self, message: str, title: str = "提示") -> None:
+    def _info(self, message: str, title: str = "Info") -> None:
         QMessageBox.information(self, title, message)
 
-    def _confirm(self, message: str, title: str = "確認") -> bool:
+    def _confirm(self, message: str, title: str = "Confirm") -> bool:
         r = QMessageBox.question(
             self,
             title,
@@ -256,43 +261,47 @@ class MainWindow(QMainWindow):
     def _selected(self) -> List[int]:
         return self.thumbs.selected_indices()
 
-    def _require_selection(self) -> Optional[List[int]]:
-        sel = self._selected()
-        if not sel:
-            self._info("請先在縮圖列選取一或多個頁面。")
-            return None
-        return sel
-
     def _update_title(self) -> None:
-        name = "未命名.pdf"
+        name = "Untitled.pdf"
         if self.service.path:
             name = self.service.path.name
         dirty = " *" if self.service.dirty else ""
-        self.setWindowTitle(f"PDF 編輯器 — {name}{dirty}")
+        self.setWindowTitle(f"PDF Editor — {name}{dirty}")
 
     def _update_actions_enabled(self) -> None:
         opened = self.service.is_open
-        sel = bool(self._selected()) if opened else False
         self.act_save.setEnabled(opened and self.service.dirty)
         self.act_save_as.setEnabled(opened)
         for a in (
             self.act_delete,
             self.act_crop,
-            self.act_rot_cw,
-            self.act_rot_ccw,
-            self.act_rot_180,
+            self.act_rotate,
             self.act_extract,
+            self.act_merge,
+            self.act_reorder,
         ):
-            a.setEnabled(opened and sel)
-        self.act_merge.setEnabled(opened)
-        self.act_move_up.setEnabled(opened and sel)
-        self.act_move_down.setEnabled(opened and sel)
+            a.setEnabled(opened)
+        self.act_zoom_in.setEnabled(opened)
+        self.act_zoom_out.setEnabled(opened)
+        self.zoom_combo.setEnabled(opened)
+        for a in (
+            self.act_zoom_actual,
+            self.act_zoom_fit,
+            self.act_zoom_fit_width,
+        ):
+            a.setEnabled(opened)
 
     def _refresh_ui(self, *, keep_selection: Optional[List[int]] = None) -> None:
         if not self.service.is_open:
+            if self._crop_dialog is not None:
+                self._crop_dialog.close()
+            self._crop_dialog = None
+            self._crop_overlay = None
             self.thumbs.clear_thumbnails()
-            self.preview_label.setText("尚未開啟 PDF")
+            self.preview_label.setText("No PDF opened")
             self.preview_label.setPixmap(QPixmap())
+            self.preview_label.clear_crop_overlay()
+            self.preview_label.adjustSize()
             self._update_title()
             self._update_actions_enabled()
             return
@@ -326,8 +335,8 @@ class MainWindow(QMainWindow):
         self._update_title()
         self._update_actions_enabled()
         self.statusBar().showMessage(
-            f"共 {self.service.page_count} 頁"
-            + ("（未儲存）" if self.service.dirty else "")
+            f"Total: {self.service.page_count} pages"
+            + (" (unsaved)" if self.service.dirty else "")
         )
 
     def _show_preview(self, index: int) -> None:
@@ -346,7 +355,14 @@ class MainWindow(QMainWindow):
             self.preview_label.setText("")
             self.preview_label.adjustSize()
         except Exception as exc:  # noqa: BLE001
-            self.preview_label.setText(f"預覽失敗：{exc}")
+            self.preview_label.setText(f"Preview failed: {exc}")
+        # Re-apply an active crop overlay so it follows page/zoom changes.
+        if self._crop_overlay is not None and self.service.is_open:
+            try:
+                pw, ph = self.service.page_size(index)
+            except PdfError:
+                return
+            self.preview_label.set_crop_overlay(self._crop_overlay, pw, ph)
 
     # ------------------------------------------------------------------
     # Zoom + sidebar
@@ -394,6 +410,29 @@ class MainWindow(QMainWindow):
         )
         self._show_preview(idx)
 
+    def _on_zoom_fit_width(self) -> None:
+        if not self.service.is_open:
+            return
+        idx = self._preview_index
+        w_pt, _h_pt = self.service.page_size(idx)
+        vw = self.preview_scroll.viewport().width()
+        if w_pt <= 0 or vw <= 0:
+            return
+        margin = 24
+        self._preview_zoom = max(
+            self.ZOOM_MIN,
+            min(self.ZOOM_MAX, (vw - margin) / w_pt),
+        )
+        self._show_preview(idx)
+
+    def _on_zoom_combo_changed(self, index: int) -> None:
+        if index == 1:
+            self._on_zoom_fit()
+        elif index == 2:
+            self._on_zoom_fit_width()
+        else:
+            self._on_zoom_actual()
+
     def _toggle_sidebar(self, checked: bool) -> None:
         if checked:
             self.thumbs.setVisible(True)
@@ -412,7 +451,7 @@ class MainWindow(QMainWindow):
         if indices:
             self._show_preview(indices[0])
             self.statusBar().showMessage(
-                f"已選取 {len(indices)} 頁："
+                f"Selected {len(indices)} pages: "
                 + ", ".join(str(i + 1) for i in indices)
             )
 
@@ -425,9 +464,9 @@ class MainWindow(QMainWindow):
             return
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "開啟 PDF",
+            "Open PDF",
             "",
-            "PDF 檔案 (*.pdf);;所有檔案 (*)",
+            "PDF Files (*.pdf);;All Files (*)",
         )
         if not path:
             return
@@ -435,9 +474,9 @@ class MainWindow(QMainWindow):
             self.service.open(path)
         except PdfError as exc:
             # Try password
-            if "加密" in str(exc):
+            if "encrypted" in str(exc):
                 pwd, ok = QInputDialog.getText(
-                    self, "密碼", "此 PDF 已加密，請輸入密碼：",
+                    self, "Password", "This PDF is encrypted. Enter the password:",
                 )
                 if not ok:
                     return
@@ -465,16 +504,16 @@ class MainWindow(QMainWindow):
             return
         self._update_title()
         self._update_actions_enabled()
-        self.statusBar().showMessage("已儲存")
+        self.statusBar().showMessage("Saved")
 
     def _on_save_as(self) -> None:
         if not self.service.is_open:
             return
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "另存新檔",
-            str(self.service.path or "未命名.pdf"),
-            "PDF 檔案 (*.pdf)",
+            "Save As",
+            str(self.service.path or "Untitled.pdf"),
+            "PDF Files (*.pdf)",
         )
         if not path:
             return
@@ -487,15 +526,15 @@ class MainWindow(QMainWindow):
             return
         self._update_title()
         self._update_actions_enabled()
-        self.statusBar().showMessage(f"已儲存至 {path}")
+        self.statusBar().showMessage(f"Saved to {path}")
 
     def _maybe_save_before_close(self) -> bool:
         if not self.service.is_open or not self.service.dirty:
             return True
         r = QMessageBox.question(
             self,
-            "未儲存的變更",
-            "目前檔案有未儲存的變更，要先儲存嗎？",
+            "Unsaved Changes",
+            "The current file has unsaved changes. Save them first?",
             QMessageBox.StandardButton.Save
             | QMessageBox.StandardButton.Discard
             | QMessageBox.StandardButton.Cancel,
@@ -509,33 +548,41 @@ class MainWindow(QMainWindow):
         return True
 
     # ------------------------------------------------------------------
-    # Page ops
+    # Page ops (each tool opens an options dialog)
     # ------------------------------------------------------------------
 
     def _on_delete(self) -> None:
-        sel = self._require_selection()
-        if sel is None:
+        if not self.service.is_open:
             return
-        pages = ", ".join(str(i + 1) for i in sel)
-        if not self._confirm(f"確定刪除以下頁面？\n第 {pages} 頁", "刪除頁面"):
+        sel = self._selected()
+        dlg = DeleteDialog(
+            self, page_count=self.service.page_count, selection=sel
+        )
+        if dlg.exec() != DeleteDialog.DialogCode.Accepted:
             return
         try:
-            self.service.delete_pages(sel)
+            self.service.delete_pages(dlg.target_pages())
         except PdfError as exc:
             self._error(str(exc))
             return
-        keep = []
+        keep: List[int] = []
         n = self.service.page_count
         if n > 0:
-            keep = [min(sel[0], n - 1)]
+            keep = [min(sel[0], n - 1)] if sel else []
         self._refresh_ui(keep_selection=keep)
 
     def _on_crop(self) -> None:
         if not self.service.is_open:
             return
+        if self._crop_dialog is not None:
+            # A crop dialog is already open: focus it instead of opening another.
+            self._crop_dialog.raise_()
+            self._crop_dialog.activateWindow()
+            return
+        n = self.service.page_count
         sel = self._selected()
         idx = sel[0] if sel else 0
-        if idx >= self.service.page_count:
+        if idx >= n:
             return
         w, h = self.service.page_media_size(idx)
         # Render the full page (media box, unrotated) so the dialog's overlay
@@ -558,10 +605,55 @@ class MainWindow(QMainWindow):
             selection_count=len(sel),
             initial_box=box,
         )
-        if dlg.exec() != CropDialog.DialogCode.Accepted:
+        # Seed the preview overlay with the current margins (a zero box shows
+        # the full page rectangle).
+        if box is not None:
+            margins: Tuple[float, float, float, float] = (
+                box.left,
+                box.top,
+                box.right,
+                box.bottom,
+            )
+        else:
+            margins = (0.0, 0.0, 0.0, 0.0)
+        self._set_preview_crop_overlay(margins, idx)
+
+        dlg.margins_changed.connect(self._on_crop_margins_changed)
+        dlg.accepted.connect(lambda: self._apply_crop(dlg, sel, n))
+        dlg.finished.connect(self._on_crop_finished)
+        self._crop_dialog = dlg
+        dlg.show()  # modeless: the main window stays interactive
+
+    def _on_crop_margins_changed(
+        self, left: float, top: float, right: float, bottom: float
+    ) -> None:
+        self._set_preview_crop_overlay((left, top, right, bottom), self._preview_index)
+
+    def _set_preview_crop_overlay(
+        self, margins: Tuple[float, float, float, float], index: int
+    ) -> None:
+        self._crop_overlay = (
+            float(margins[0]),
+            float(margins[1]),
+            float(margins[2]),
+            float(margins[3]),
+        )
+        if not self.service.is_open:
             return
-        indices = self._resolve_crop_scope(dlg.scope(), sel)
-        if indices is None:
+        try:
+            pw, ph = self.service.page_size(index)
+        except PdfError:
+            return
+        self.preview_label.set_crop_overlay(self._crop_overlay, pw, ph)
+
+    def _apply_crop(
+        self, dlg: CropDialog, sel: List[int], page_count: int
+    ) -> None:
+        indices = resolve_scope(dlg.scope(), page_count, sel)
+        if not indices:
+            self._info(
+                "Please select one or more pages in the thumbnail sidebar first."
+            )
             return
         try:
             self.service.crop_pages(indices, dlg.crop_box())
@@ -570,118 +662,91 @@ class MainWindow(QMainWindow):
             return
         self._refresh_ui(keep_selection=sel)
 
-    def _resolve_crop_scope(
-        self, scope: str, selection: List[int]
-    ) -> Optional[List[int]]:
-        n = self.service.page_count
-        if scope == "all":
-            return list(range(n))
-        if scope == "odd":
-            return list(range(0, n, 2))
-        if scope == "even":
-            return list(range(1, n, 2))
-        if scope == "selected":
-            if not selection:
-                self._info("請先在縮圖列選取一或多個頁面。")
-                return None
-            return sorted(selection)
-        return None
+    def _on_crop_finished(self, *_args: object) -> None:
+        self._crop_dialog = None
+        self._crop_overlay = None
+        self.preview_label.clear_crop_overlay()
 
-    def _on_rotate(self, degrees: int) -> None:
-        sel = self._require_selection()
-        if sel is None:
+    def _on_rotate(self) -> None:
+        if not self.service.is_open:
+            return
+        dlg = RotateDialog(
+            self, page_count=self.service.page_count, selection=self._selected()
+        )
+        if dlg.exec() != RotateDialog.DialogCode.Accepted:
             return
         try:
-            self.service.rotate_pages(sel, degrees)
+            self.service.rotate_pages(dlg.target_pages(), dlg.angle())
         except PdfError as exc:
             self._error(str(exc))
             return
-        self._refresh_ui(keep_selection=sel)
+        self._refresh_ui(keep_selection=self._selected())
 
     def _on_extract(self) -> None:
-        sel = self._require_selection()
-        if sel is None:
+        if not self.service.is_open:
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "匯出選取頁面",
-            "extracted.pdf",
-            "PDF 檔案 (*.pdf)",
+        dlg = ExtractDialog(
+            self, page_count=self.service.page_count, selection=self._selected()
         )
-        if not path:
+        if dlg.exec() != ExtractDialog.DialogCode.Accepted:
             return
-        if not path.lower().endswith(".pdf"):
-            path += ".pdf"
+        pages = dlg.target_pages()
+        if not pages:
+            self._info("No pages selected to extract.")
+            return
+        dest = dlg.destination()
         try:
-            self.service.extract_pages(sel, path)
+            self.service.extract_pages(pages, dest)
         except PdfError as exc:
             self._error(str(exc))
             return
-        self._info(f"已匯出 {len(sel)} 頁至：\n{path}")
+        self._info(f"Exported {len(pages)} pages to:\n{dest}")
 
     def _on_merge(self) -> None:
         if not self.service.is_open:
             return
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "選擇要合併的 PDF",
-            "",
-            "PDF 檔案 (*.pdf)",
-        )
-        if not path:
+        dlg = MergeDialog(self, page_count=self.service.page_count)
+        if dlg.exec() != MergeDialog.DialogCode.Accepted:
             return
-        # Ask insert position
-        n = self.service.page_count
-        items = ["附加到結尾"] + [f"插入到第 {i + 1} 頁之前" for i in range(n)]
-        choice, ok = QInputDialog.getItem(
-            self, "合併位置", "選擇插入位置：", items, 0, False
-        )
-        if not ok:
+        src = dlg.source_path()
+        if not src:
+            self._error("Choose a PDF file to merge.")
             return
-        insert_at: Optional[int]
-        if choice == "附加到結尾":
-            insert_at = None
-        else:
-            insert_at = items.index(choice) - 1
-
+        insert_at = dlg.insert_at()
         try:
-            self.service.merge_pdf(path, insert_at=insert_at)
-        except PdfError as e:
-            if "加密" in str(e):
-                pwd, ok2 = QInputDialog.getText(self, "密碼", "請輸入密碼：")
-                if not ok2:
+            self.service.merge_pdf(src, insert_at=insert_at)
+        except PdfError as exc:
+            if "encrypted" in str(exc):
+                pwd, ok = QInputDialog.getText(
+                    self, "Password", "Enter password:"
+                )
+                if not ok:
                     return
                 try:
-                    self.service.merge_pdf(path, insert_at=insert_at, password=pwd)
-                except PdfError as e2:
-                    self._error(str(e2))
+                    self.service.merge_pdf(
+                        src, insert_at=insert_at, password=pwd
+                    )
+                except PdfError as exc2:
+                    self._error(str(exc2))
                     return
             else:
-                self._error(str(e))
+                self._error(str(exc))
                 return
         self._refresh_ui()
 
-    def _on_move_up(self) -> None:
-        sel = self._require_selection()
-        if sel is None:
+    def _on_reorder(self) -> None:
+        if not self.service.is_open:
+            return
+        dlg = ReorderDialog(self, page_count=self.service.page_count)
+        if dlg.exec() != ReorderDialog.DialogCode.Accepted:
             return
         try:
-            new_sel = self.service.move_pages_up(sel)
+            self.service.reorder_pages(dlg.new_order())
         except PdfError as exc:
             self._error(str(exc))
             return
-        self._refresh_ui(keep_selection=new_sel)
-
-    def _on_move_down(self) -> None:
-        sel = self._require_selection()
-        if sel is None:
-            return
-        try:
-            new_sel = self.service.move_pages_down(sel)
-        except PdfError as exc:
-            self._error(str(exc))
-            return
-        self._refresh_ui(keep_selection=new_sel)
+        self._refresh_ui()
+        self.statusBar().showMessage("Pages reordered (unsaved)")
 
     def _on_pages_reordered(self, new_order: List[int]) -> None:
         try:
@@ -697,15 +762,15 @@ class MainWindow(QMainWindow):
         sel = self.thumbs.selected_indices()
         if sel:
             self._show_preview(sel[0])
-        self.statusBar().showMessage("已重新排序頁面（未儲存）")
+        self.statusBar().showMessage("Pages reordered (unsaved)")
 
     def _on_about(self) -> None:
         QMessageBox.about(
             self,
-            "關於 PDF 編輯器",
-            "PDF 編輯器 MVP\n"
-            "以 PySide6 + PyMuPDF 打造的輕量頁面編輯工具。\n\n"
-            "功能：檢視、多選、刪除、裁剪、旋轉、匯出、排序、合併。",
+            "About PDF Editor",
+            "PDF Editor MVP\n"
+            "A lightweight page editing tool built with PySide6 + PyMuPDF.\n\n"
+            "Features: view, multi-select, delete, crop, rotate, extract, reorder, merge.",
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802

@@ -1,4 +1,4 @@
-"""Crop margins dialog (Traditional Chinese UI).
+"""Crop margins dialog.
 
 Shows a live preview of the page with the crop region drawn on it. The region
 can be adjusted by dragging the edges/corners of the overlay, or by editing the
@@ -122,7 +122,7 @@ class CropPreview(QWidget):
             p.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
-                "（無法取得頁面預覽）",
+                "(Page preview unavailable)",
             )
             return
 
@@ -274,6 +274,9 @@ class CropPreview(QWidget):
 class CropDialog(QDialog):
     """Ask user for crop margins and which pages to apply them to."""
 
+    # Forwarded live margin updates: (left, top, right, bottom) in points.
+    margins_changed = Signal(float, float, float, float)
+
     def __init__(
         self,
         parent: Optional[QWidget] = None,
@@ -285,8 +288,10 @@ class CropDialog(QDialog):
         initial_box: Optional[CropBox] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("裁剪頁面")
-        self.setModal(True)
+        self.setWindowTitle("Crop Pages")
+        # Modeless on purpose: the main window (and its thumbnail sidebar) must
+        # stay interactive so the preview overlay can follow page changes.
+        self.setModal(False)
         self.setMinimumWidth(480)
         self._page_width = page_width
         self._page_height = page_height
@@ -301,9 +306,9 @@ class CropDialog(QDialog):
         layout.addWidget(self.preview, stretch=1)
 
         hint = QLabel(
-            "輸入四邊要裁去的邊界（單位：點 / pt，1 吋 = 72 pt），"
-            "或在左側預覽直接拖曳邊緣。\n"
-            f"目前頁面大約：{page_width:.0f} × {page_height:.0f} pt"
+            "Enter the margins to cut from each side (units: points / pt, 1 inch = 72 pt), "
+            "or drag the edges directly in the preview on the left.\n"
+            f"Current page is roughly: {page_width:.0f} × {page_height:.0f} pt"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -313,23 +318,23 @@ class CropDialog(QDialog):
         self.top = self._spin()
         self.right = self._spin()
         self.bottom = self._spin()
-        form.addWidget(QLabel("左邊距 (Left)："), 0, 0)
+        form.addWidget(QLabel("Left margin:"), 0, 0)
         form.addWidget(self.left, 0, 1)
-        form.addWidget(QLabel("上邊距 (Top)："), 0, 2)
+        form.addWidget(QLabel("Top margin:"), 0, 2)
         form.addWidget(self.top, 0, 3)
-        form.addWidget(QLabel("右邊距 (Right)："), 1, 0)
+        form.addWidget(QLabel("Right margin:"), 1, 0)
         form.addWidget(self.right, 1, 1)
-        form.addWidget(QLabel("下邊距 (Bottom)："), 1, 2)
+        form.addWidget(QLabel("Bottom margin:"), 1, 2)
         form.addWidget(self.bottom, 1, 3)
         layout.addLayout(form)
 
-        scope_box = QGroupBox("套用範圍")
+        scope_box = QGroupBox("Apply to")
         scope_layout = QVBoxLayout(scope_box)
         self.scope_group = QButtonGroup(self)
-        self.rb_all = QRadioButton("全部頁面")
-        self.rb_odd = QRadioButton("單數頁（第 1、3、5…頁）")
-        self.rb_even = QRadioButton("雙數頁（第 2、4、6…頁）")
-        self.rb_sel = QRadioButton(f"選取頁面（已選取 {selection_count} 頁）")
+        self.rb_all = QRadioButton("All pages")
+        self.rb_odd = QRadioButton("Odd pages (1, 3, 5…)")
+        self.rb_even = QRadioButton("Even pages (2, 4, 6…)")
+        self.rb_sel = QRadioButton(f"Selected pages ({selection_count} selected)")
         if selection_count <= 0:
             self.rb_sel.setEnabled(False)
         for rb in (self.rb_all, self.rb_odd, self.rb_even, self.rb_sel):
@@ -339,15 +344,15 @@ class CropDialog(QDialog):
         if selection_count > 0:
             self.rb_sel.setChecked(True)
         else:
-            self.rb_sel.setText("選取頁面（無選取）")
+            self.rb_sel.setText("Selected pages (none selected)")
             self.rb_all.setChecked(True)
         layout.addWidget(scope_box)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("套用")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Apply")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancel")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -395,11 +400,13 @@ class CropDialog(QDialog):
 
     def _on_margin_value_changed(self, *_: object) -> None:
         self.preview.set_margins(*self._current_margins())
+        self.margins_changed.emit(*self._current_margins())
 
     def _on_preview_margins(
         self, left: float, top: float, right: float, bottom: float
     ) -> None:
         self._set_margins(left, top, right, bottom)
+        self.margins_changed.emit(left, top, right, bottom)
 
     # ------------------------------------------------------------------
     # Results

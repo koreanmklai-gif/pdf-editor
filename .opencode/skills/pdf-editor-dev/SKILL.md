@@ -6,7 +6,7 @@ description: Guide for working on the PDF editor — architecture, virtualenv us
 # PDF Editor Development
 
 Lightweight desktop PDF page editor: view, multi-select, delete, crop, rotate, extract, reorder, merge.
-Built with **Python 3.11+**, **PySide6 (Qt6)**, and **PyMuPDF (fitz)**. All user-facing UI text is Traditional Chinese (港／台式用語).
+Built with **Python 3.11+**, **PySide6 (Qt6)**, and **PyMuPDF (fitz)**. All user-facing UI text is English.
 
 ## Environment
 
@@ -36,7 +36,7 @@ scripts/
 ## Conventions
 
 - Keep PDF logic in `app/services/pdf_service.py` and GUI code in `app/ui/`; UI modules must not use `fitz` directly.
-- Raise user-facing failures as `PdfError` with a Traditional Chinese message.
+- Raise user-facing failures as `PdfError` with a clear English message.
 - Type hints everywhere; start modules with `from __future__ import annotations`.
 - `PdfService` renders pages to PNG bytes (`render_page`) and tracks a dirty flag; the GUI refreshes via `_refresh_ui`.
 - After changing dependencies, refresh the lock: `.venv/bin/pip freeze > requirements.lock.txt`.

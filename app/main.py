@@ -11,7 +11,7 @@ from app.ui.main_window import MainWindow
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("PDF 編輯器")
+    app.setApplicationName("PDF Editor")
     app.setOrganizationName("pdf-editor")
     window = MainWindow()
     window.show()

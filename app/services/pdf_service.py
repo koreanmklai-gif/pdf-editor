@@ -12,7 +12,7 @@ import fitz  # PyMuPDF
 
 
 class PdfError(Exception):
-    """User-facing PDF error with a clear Traditional Chinese message."""
+    """User-facing PDF error with a clear message."""
 
     def __init__(self, message: str, *, cause: Optional[BaseException] = None):
         super().__init__(message)
@@ -35,7 +35,7 @@ class CropBox:
         x1 = mb.x1 - self.right
         y1 = mb.y1 - self.bottom
         if x1 <= x0 or y1 <= y0:
-            raise PdfError("裁剪範圍無效：邊界過大，頁面會變成空矩形。")
+            raise PdfError("Invalid crop area: margins are too large, the page would become an empty rectangle.")
         return fitz.Rect(x0, y0, x1, y1)
 
 
@@ -84,24 +84,24 @@ class PdfService:
     def open(self, path: Union[str, Path], password: str = "") -> None:
         path = Path(path)
         if not path.exists():
-            raise PdfError(f"找不到檔案：{path}")
+            raise PdfError(f"File not found: {path}")
         try:
             doc = fitz.open(path)
         except Exception as exc:  # noqa: BLE001
             raise PdfError(
-                f"無法開啟 PDF（可能已損毀或格式不支援）：{path.name}",
+                f"Cannot open PDF (it may be corrupted or the format is unsupported): {path.name}",
                 cause=exc,
             ) from exc
 
         if doc.needs_pass:
             if not password or not doc.authenticate(password):
                 doc.close()
-                raise PdfError("此 PDF 已加密，需要正確密碼才能開啟。")
+                raise PdfError("This PDF is encrypted and requires a valid password to open.")
 
         if doc.is_encrypted and doc.permissions == 0:
             # Still locked somehow
             doc.close()
-            raise PdfError("此 PDF 已加密，無法讀取內容。")
+            raise PdfError("This PDF is encrypted and its content cannot be read.")
 
         self.close()
         self._doc = doc
@@ -119,7 +119,7 @@ class PdfService:
         self._ensure_open()
         target = Path(path) if path is not None else self._path
         if target is None:
-            raise PdfError("尚未指定儲存路徑，請使用「另存新檔」。")
+            raise PdfError("No save path specified. Use Save As.")
 
         target = Path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -152,7 +152,7 @@ class PdfService:
         except PdfError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise PdfError(f"儲存失敗：{exc}", cause=exc) from exc
+            raise PdfError(f"Save failed: {exc}", cause=exc) from exc
 
         self._path = target
         self._dirty = False
@@ -261,19 +261,9 @@ class PdfService:
         for i in unique:
             self._ensure_index(i)
         if len(unique) >= self.page_count:
-            raise PdfError("無法刪除所有頁面；請至少保留一頁。")
+            raise PdfError("Cannot delete all pages; at least one page must remain.")
         # PyMuPDF delete_pages accepts a list (descending is safer for some versions)
         self._doc.delete_pages(unique)  # type: ignore[union-attr]
-        self._dirty = True
-
-    def rotate_pages(self, indices: Sequence[int], degrees: int) -> None:
-        self._ensure_open()
-        if degrees % 90 != 0:
-            raise PdfError("旋轉角度必須是 90 的倍數。")
-        for i in sorted({int(x) for x in indices}):
-            self._ensure_index(i)
-            page = self._doc.load_page(i)  # type: ignore[union-attr]
-            page.set_rotation((page.rotation + degrees) % 360)
         self._dirty = True
 
     def crop_pages(self, indices: Sequence[int], crop: CropBox) -> None:
@@ -285,10 +275,20 @@ class PdfService:
             page.set_cropbox(rect)
         self._dirty = True
 
+    def rotate_pages(self, indices: Sequence[int], degrees: int) -> None:
+        self._ensure_open()
+        if degrees % 90 != 0:
+            raise PdfError("Rotation angle must be a multiple of 90.")
+        for i in sorted({int(x) for x in indices}):
+            self._ensure_index(i)
+            page = self._doc.load_page(i)  # type: ignore[union-attr]
+            page.set_rotation((page.rotation + degrees) % 360)
+        self._dirty = True
+
     def extract_pages(self, indices: Sequence[int], dest: Union[str, Path]) -> Path:
         self._ensure_open()
         if not indices:
-            raise PdfError("請先選取要匯出的頁面。")
+            raise PdfError("Select the pages to extract first.")
         ordered = [int(i) for i in indices]
         for i in ordered:
             self._ensure_index(i)
@@ -304,8 +304,65 @@ class PdfService:
         except PdfError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise PdfError(f"匯出失敗：{exc}", cause=exc) from exc
+            raise PdfError(f"Export failed: {exc}", cause=exc) from exc
         return dest
+
+    def merge_pdf(
+        self,
+        other_path: Union[str, Path],
+        *,
+        insert_at: Optional[int] = None,
+        password: str = "",
+    ) -> None:
+        """Append or insert all pages from another PDF.
+
+        insert_at=None means append at end.
+        insert_at=k means insert before current page k.
+        """
+        self._ensure_open()
+        other_path = Path(other_path)
+        if not other_path.exists():
+            raise PdfError(f"File to merge not found: {other_path}")
+        try:
+            other = fitz.open(other_path)
+        except Exception as exc:  # noqa: BLE001
+            raise PdfError(
+                f"Cannot open the PDF to merge: {other_path.name}",
+                cause=exc,
+            ) from exc
+
+        try:
+            if other.needs_pass:
+                if not password or not other.authenticate(password):
+                    raise PdfError("The PDF to merge is encrypted and requires a valid password.")
+            if other.page_count == 0:
+                raise PdfError("The PDF to merge has no pages.")
+
+            if insert_at is None:
+                self._doc.insert_pdf(other)  # type: ignore[union-attr]
+            else:
+                if insert_at < 0 or insert_at > self.page_count:
+                    raise PdfError("Insert position is out of range.")
+                # Rebuild: [0..insert_at) + other + [insert_at..end)
+                new_doc = fitz.open()
+                if insert_at > 0:
+                    new_doc.insert_pdf(
+                        self._doc, from_page=0, to_page=insert_at - 1
+                    )
+                new_doc.insert_pdf(other)
+                if insert_at < self.page_count:
+                    new_doc.insert_pdf(
+                        self._doc, from_page=insert_at, to_page=self.page_count - 1
+                    )
+                # Preserve path, replace doc
+                path = self._path
+                self._doc.close()  # type: ignore[union-attr]
+                self._doc = new_doc
+                self._path = path
+        finally:
+            other.close()
+
+        self._dirty = True
 
     def reorder_pages(self, new_order: Sequence[int]) -> None:
         """Reorder pages. new_order is a permutation of 0..n-1."""
@@ -313,7 +370,7 @@ class PdfService:
         n = self.page_count
         order = [int(i) for i in new_order]
         if len(order) != n or sorted(order) != list(range(n)):
-            raise PdfError("頁面排序無效：必須是完整的頁面排列。")
+            raise PdfError("Invalid page order: it must be a complete arrangement of the pages.")
         if order == list(range(n)):
             return
         # select() reorders in place in recent PyMuPDF
@@ -335,7 +392,7 @@ class PdfService:
         n = self.page_count
         self._ensure_index(from_index)
         if to_index < 0 or to_index >= n:
-            raise PdfError("目標位置超出範圍。")
+            raise PdfError("Target position is out of range.")
         if from_index == to_index:
             return
         order = list(range(n))
@@ -387,63 +444,6 @@ class PdfService:
         new_sel = [order.index(i) for i in sorted(set(indices))]
         return sorted(new_sel)
 
-    def merge_pdf(
-        self,
-        other_path: Union[str, Path],
-        *,
-        insert_at: Optional[int] = None,
-        password: str = "",
-    ) -> None:
-        """Append or insert all pages from another PDF.
-
-        insert_at=None means append at end.
-        insert_at=k means insert before current page k.
-        """
-        self._ensure_open()
-        other_path = Path(other_path)
-        if not other_path.exists():
-            raise PdfError(f"找不到要合併的檔案：{other_path}")
-        try:
-            other = fitz.open(other_path)
-        except Exception as exc:  # noqa: BLE001
-            raise PdfError(
-                f"無法開啟要合併的 PDF：{other_path.name}",
-                cause=exc,
-            ) from exc
-
-        try:
-            if other.needs_pass:
-                if not password or not other.authenticate(password):
-                    raise PdfError("要合併的 PDF 已加密，需要正確密碼。")
-            if other.page_count == 0:
-                raise PdfError("要合併的 PDF 沒有頁面。")
-
-            if insert_at is None:
-                self._doc.insert_pdf(other)  # type: ignore[union-attr]
-            else:
-                if insert_at < 0 or insert_at > self.page_count:
-                    raise PdfError("插入位置超出範圍。")
-                # Rebuild: [0..insert_at) + other + [insert_at..end)
-                new_doc = fitz.open()
-                if insert_at > 0:
-                    new_doc.insert_pdf(
-                        self._doc, from_page=0, to_page=insert_at - 1
-                    )
-                new_doc.insert_pdf(other)
-                if insert_at < self.page_count:
-                    new_doc.insert_pdf(
-                        self._doc, from_page=insert_at, to_page=self.page_count - 1
-                    )
-                # Preserve path, replace doc
-                path = self._path
-                self._doc.close()  # type: ignore[union-attr]
-                self._doc = new_doc
-                self._path = path
-        finally:
-            other.close()
-
-        self._dirty = True
-
     def create_blank_pdf(
         self,
         pages: int = 3,
@@ -482,8 +482,8 @@ class PdfService:
 
     def _ensure_open(self) -> None:
         if not self.is_open:
-            raise PdfError("尚未開啟任何 PDF。")
+            raise PdfError("No PDF is open.")
 
     def _ensure_index(self, index: int) -> None:
         if index < 0 or index >= self.page_count:
-            raise PdfError(f"頁碼超出範圍：{index + 1}（共 {self.page_count} 頁）")
+            raise PdfError(f"Page number out of range: {index + 1} (total {self.page_count} pages)")

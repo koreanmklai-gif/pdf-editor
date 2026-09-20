@@ -1,5 +1,8 @@
 """Thumbnail strip with multi-select and drag-drop reorder.
 
+Thumbnails are laid out in a wrapping grid: a narrow sidebar shows a single
+column, and widening it reveals up to 5 columns (Acrobat-style).
+
 Rendering is lazy: :meth:`set_placeholder_pages` fills the widget with cheap
 shared-placeholder items, and :meth:`set_thumbnail` swaps in real renderings
 in place. The owner schedules fills via the :attr:`visible_range_changed`
@@ -22,6 +25,10 @@ from PySide6.QtWidgets import (
 PLACEHOLDER_SIZE = (100, 140)
 PLACEHOLDER_COLOR = QColor("#3f3f3f")
 
+# Sidebar width limits: one 110px column at the minimum, five at the maximum.
+MIN_SIDEBAR_WIDTH = 168
+MAX_SIDEBAR_WIDTH = 640
+
 
 class ThumbnailList(QListWidget):
     """Horizontal or vertical thumbnail list with shift/ctrl selection + DnD."""
@@ -34,8 +41,8 @@ class ThumbnailList(QListWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setViewMode(QListWidget.ViewMode.IconMode)
-        self.setFlow(QListWidget.Flow.TopToBottom)
-        self.setWrapping(False)
+        self.setFlow(QListWidget.Flow.LeftToRight)
+        self.setWrapping(True)
         self.setMovement(QListWidget.Movement.Snap)
         self.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -49,8 +56,8 @@ class ThumbnailList(QListWidget):
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setMinimumWidth(168)
-        self.setMaximumWidth(240)
+        self.setMinimumWidth(MIN_SIDEBAR_WIDTH)
+        self.setMaximumWidth(MAX_SIDEBAR_WIDTH)
 
         self.itemSelectionChanged.connect(self._emit_selection)
         self.itemDoubleClicked.connect(self._on_double_click)
@@ -96,10 +103,10 @@ class ThumbnailList(QListWidget):
             self.item(index).setIcon(QIcon(pixmap))
 
     def visible_range(self) -> Tuple[int, int]:
-        """First and last (inclusive) row indices currently in the viewport.
+        """First and last (inclusive) item indices currently in the viewport.
 
-        Samples the item column down the viewport (their left edge is
-        indented by the frame margin, so hits happen at the column center).
+        Samples a grid of points across the whole viewport (items are laid
+        out in columns, so hits can happen anywhere across the width).
         """
         n = self.count()
         if n == 0:
@@ -107,16 +114,18 @@ class ThumbnailList(QListWidget):
         vp = self.viewport()
         if vp is None or vp.width() < 4 or vp.height() < 4:
             return (0, 0)
-        x = vp.width() // 2
         seen: List[int] = []
         step = 40
         for y in range(2, vp.height(), step):
-            idx = self.indexAt(QPoint(x, y))
+            for x in range(4, vp.width(), step):
+                idx = self.indexAt(QPoint(x, y))
+                if idx.isValid():
+                    seen.append(idx.row())
+        # Probe the very bottom edge so partially visible rows are included.
+        for x in range(4, vp.width(), step):
+            idx = self.indexAt(QPoint(x, vp.height() - 2))
             if idx.isValid():
                 seen.append(idx.row())
-        idx = self.indexAt(QPoint(x, vp.height() - 2))
-        if idx.isValid():
-            seen.append(idx.row())
         if not seen:
             return (0, 0)
         return (min(seen), max(seen))

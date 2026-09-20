@@ -6,7 +6,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QByteArray, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMainWindow,
     QMessageBox,
-    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStatusBar,
@@ -34,11 +33,11 @@ from app.ui.crop_dialog import CropDialog
 from app.ui.delete_dialog import DeleteDialog
 from app.ui.extract_dialog import ExtractDialog
 from app.ui.merge_dialog import MergeDialog
-from app.ui.preview_label import PreviewLabel
+from app.ui.preview_label import PreviewLabel, PreviewScrollArea
 from app.ui.reorder_dialog import ReorderDialog
 from app.ui.rotate_dialog import RotateDialog
 from app.ui.scope_selector import resolve_scope
-from app.ui.thumbnail_list import ThumbnailList
+from app.ui.thumbnail_list import MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, ThumbnailList
 
 
 class MainWindow(QMainWindow):
@@ -52,7 +51,16 @@ class MainWindow(QMainWindow):
         self._preview_index: int = 0
         self._thumb_cache_zoom = 0.35
         self._preview_zoom = 1.5
-        self._sidebar_last_w = 210
+        self._settings = QSettings()  # org "pdf-editor" / app "PDF Editor"
+        self._sidebar_last_w = int(
+            self._settings.value("sidebar/width", MIN_SIDEBAR_WIDTH, type=int)
+        )
+        self._sidebar_last_w = int(
+            max(
+                MIN_SIDEBAR_WIDTH,
+                min(MAX_SIDEBAR_WIDTH, self._sidebar_last_w),
+            )
+        )
         self._crop_overlay: Optional[Tuple[float, float, float, float]] = None
         self._crop_dialog: Optional[CropDialog] = None
 
@@ -98,13 +106,14 @@ class MainWindow(QMainWindow):
         self.thumbs.visible_range_changed.connect(self._schedule_fill)
         self.splitter.addWidget(self.thumbs)
 
-        # Right: center preview
-        self.preview_scroll = QScrollArea()
+        # Right: center preview (drag-and-drop capable; gated to empty state)
+        self.preview_scroll = PreviewScrollArea()
         self.preview_scroll.setWidgetResizable(False)
         self.preview_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_scroll.viewport().setStyleSheet(
             "background: #3a3a3a; border: none;"
         )
+        self.preview_scroll.pdf_dropped.connect(self._open_pdf)
         self.preview_label = PreviewLabel("No PDF opened")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumSize(400, 500)
@@ -321,6 +330,8 @@ class MainWindow(QMainWindow):
             self.preview_label.setPixmap(QPixmap())
             self.preview_label.clear_crop_overlay()
             self.preview_label.adjustSize()
+            # Allow dropping a PDF onto the viewing window only in the empty state.
+            self.preview_scroll.set_drop_enabled(True)
             self._update_title()
             self._update_actions_enabled()
             return
@@ -328,6 +339,8 @@ class MainWindow(QMainWindow):
         # Page indices/content may have shifted: drop cached renderings.
         self._thumb_cache.clear()
         self._preview_cache.clear()
+        # Drops only apply in the empty, no-document state.
+        self.preview_scroll.set_drop_enabled(False)
 
         prev_sel = keep_selection if keep_selection is not None else self._selected()
         n = self.service.page_count
@@ -513,7 +526,16 @@ class MainWindow(QMainWindow):
             self._schedule_fill()
         else:
             self._sidebar_last_w = self.thumbs.width()
+            self.save_sidebar_width()
             self.thumbs.setVisible(False)
+
+    def save_sidebar_width(self) -> None:
+        """Persist the current sidebar width via QSettings.
+
+        Mirrors the restore key (``sidebar/width``) used in ``__init__`` so a
+        width adjusted while the sidebar is visible survives a relaunch.
+        """
+        self._settings.setValue("sidebar/width", self._sidebar_last_w)
 
     def _on_selection_changed(self, indices: List[int]) -> None:
         self._update_actions_enabled()
@@ -539,6 +561,15 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._open_pdf(path)
+
+    def _open_pdf(self, path: str) -> None:
+        """Open ``path`` (shared by the toolbar dialog and drag-and-drop).
+
+        Reuses the same password-retry path for encrypted PDFs; after a
+        successful open, drops are rejected (they only make sense in the
+        empty, no-document state).
+        """
         try:
             self.service.open(path)
         except PdfError as exc:
@@ -557,6 +588,7 @@ class MainWindow(QMainWindow):
             else:
                 self._error(str(exc))
                 return
+        self.preview_scroll.set_drop_enabled(False)
         self._preview_index = 0
         self._refresh_ui(keep_selection=[0])
 
@@ -847,6 +879,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._maybe_save_before_close():
+            self._sidebar_last_w = self.thumbs.width()
+            self.save_sidebar_width()
             self.service.close()
             event.accept()
         else:

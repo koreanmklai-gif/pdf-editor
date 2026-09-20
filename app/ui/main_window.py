@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QByteArray
+from PySide6.QtCore import Qt, QByteArray, QTimer
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
+    QImage,
     QKeySequence,
     QPixmap,
 )
@@ -54,6 +56,20 @@ class MainWindow(QMainWindow):
         self._crop_overlay: Optional[Tuple[float, float, float, float]] = None
         self._crop_dialog: Optional[CropDialog] = None
 
+        # LRU caches: thumbnails by (page_index, zoom), previews by the same.
+        # Thumbnails are rendered lazily for the visible window only; previews
+        # avoid re-rendering when we jump between a few pages.
+        self._thumb_cache: OrderedDict[Tuple[int, float], QPixmap] = OrderedDict()
+        self._thumb_cache_max = 300
+        self._preview_cache: OrderedDict[Tuple[int, float], QPixmap] = OrderedDict()
+        self._preview_cache_max = 3
+
+        # Debounced thumbnail fill: multiple scroll events collapse into one pass.
+        self._fill_timer = QTimer(self)
+        self._fill_timer.setSingleShot(True)
+        self._fill_timer.setInterval(50)
+        self._fill_timer.timeout.connect(self._fill_visible_thumbnails)
+
         self._build_ui()
         self._build_toolbar()
         self._build_menus()
@@ -79,6 +95,7 @@ class MainWindow(QMainWindow):
         self.thumbs.selection_changed_custom.connect(self._on_selection_changed)
         self.thumbs.pages_reordered.connect(self._on_pages_reordered)
         self.thumbs.page_activated.connect(self._show_preview)
+        self.thumbs.visible_range_changed.connect(self._schedule_fill)
         self.splitter.addWidget(self.thumbs)
 
         # Right: center preview
@@ -297,6 +314,8 @@ class MainWindow(QMainWindow):
                 self._crop_dialog.close()
             self._crop_dialog = None
             self._crop_overlay = None
+            self._thumb_cache.clear()
+            self._preview_cache.clear()
             self.thumbs.clear_thumbnails()
             self.preview_label.setText("No PDF opened")
             self.preview_label.setPixmap(QPixmap())
@@ -306,25 +325,15 @@ class MainWindow(QMainWindow):
             self._update_actions_enabled()
             return
 
-        pixmaps: List[QPixmap] = []
-        labels: List[str] = []
-        for i in range(self.service.page_count):
-            try:
-                data = self.service.render_page(
-                    i, zoom=self._thumb_cache_zoom, max_side=160
-                )
-                pix = QPixmap()
-                pix.loadFromData(QByteArray(data), "PNG")
-                pixmaps.append(pix)
-            except Exception:  # noqa: BLE001
-                pixmaps.append(QPixmap(100, 140))
-            labels.append(str(i + 1))
+        # Page indices/content may have shifted: drop cached renderings.
+        self._thumb_cache.clear()
+        self._preview_cache.clear()
 
         prev_sel = keep_selection if keep_selection is not None else self._selected()
-        self.thumbs.set_thumbnails(pixmaps, labels)
+        n = self.service.page_count
+        self.thumbs.set_placeholder_pages(n)
 
         # Restore selection (clamp)
-        n = self.service.page_count
         restored = [i for i in prev_sel if 0 <= i < n]
         if not restored and n > 0:
             restored = [min(self._preview_index, n - 1)]
@@ -332,6 +341,7 @@ class MainWindow(QMainWindow):
 
         preview_idx = restored[0] if restored else 0
         self._show_preview(preview_idx)
+        self._schedule_fill()
         self._update_title()
         self._update_actions_enabled()
         self.statusBar().showMessage(
@@ -339,23 +349,81 @@ class MainWindow(QMainWindow):
             + (" (unsaved)" if self.service.dirty else "")
         )
 
+    # ------------------------------------------------------------------
+    # Lazy thumbnail pipeline
+    # ------------------------------------------------------------------
+
+    def _schedule_fill(self) -> None:
+        """Debounce fill requests so scroll bursts collapse into one pass."""
+        if self.service.is_open:
+            self._fill_timer.start()
+
+    def _fill_visible_thumbnails(self) -> None:
+        if not self.service.is_open:
+            return
+        first, last = self.thumbs.visible_range()
+        if last < first:
+            return
+        lookahead = 25
+        lo = max(0, first - lookahead)
+        hi = min(self.service.page_count - 1, last + lookahead)
+        for i in range(lo, hi + 1):
+            self._load_thumbnail(i)
+
+    def _load_thumbnail(self, index: int) -> None:
+        key = (index, self._thumb_cache_zoom)
+        cached = self._thumb_cache.get(key)
+        if cached is not None:
+            self.thumbs.set_thumbnail(index, cached)
+            return
+        try:
+            page = self.service.render_page_raw(
+                index, zoom=self._thumb_cache_zoom, max_side=160
+            )
+        except Exception:  # noqa: BLE001
+            return  # keep the placeholder in place
+        img = QImage(
+            page.samples, page.width, page.height, page.stride,
+            QImage.Format.Format_RGB888,
+        )
+        pix = QPixmap.fromImage(img)
+        self._thumb_cache[key] = pix
+        self._thumb_cache.move_to_end(key)
+        while len(self._thumb_cache) > self._thumb_cache_max:
+            self._thumb_cache.popitem(last=False)
+        self.thumbs.set_thumbnail(index, pix)
+
     def _show_preview(self, index: int) -> None:
         if not self.service.is_open:
             return
         if index < 0 or index >= self.service.page_count:
             return
         self._preview_index = index
-        try:
-            data = self.service.render_page(
-                index, zoom=self._preview_zoom, max_side=None
-            )
-            pix = QPixmap()
-            pix.loadFromData(QByteArray(data), "PNG")
-            self.preview_label.setPixmap(pix)
-            self.preview_label.setText("")
-            self.preview_label.adjustSize()
-        except Exception as exc:  # noqa: BLE001
-            self.preview_label.setText(f"Preview failed: {exc}")
+        key = (index, self._preview_zoom)
+        cached = self._preview_cache.get(key)
+        if cached is not None:
+            self._preview_cache.move_to_end(key)
+            pix = cached
+        else:
+            try:
+                page = self.service.render_page_raw(
+                    index, zoom=self._preview_zoom, max_side=None
+                )
+                img = QImage(
+                    page.samples, page.width, page.height, page.stride,
+                    QImage.Format.Format_RGB888,
+                )
+                pix = QPixmap.fromImage(img)
+            except Exception as exc:  # noqa: BLE001
+                self.preview_label.setText(f"Preview failed: {exc}")
+                return
+            self._preview_cache[key] = pix
+            self._preview_cache.move_to_end(key)
+            while len(self._preview_cache) > self._preview_cache_max:
+                self._preview_cache.popitem(last=False)
+        self.preview_label.setPixmap(pix)
+        self.preview_label.setText("")
+        self.preview_label.adjustSize()
         # Re-apply an active crop overlay so it follows page/zoom changes.
         if self._crop_overlay is not None and self.service.is_open:
             try:
@@ -442,6 +510,7 @@ class MainWindow(QMainWindow):
                     max(200, self.splitter.width() - self._sidebar_last_w),
                 ]
             )
+            self._schedule_fill()
         else:
             self._sidebar_last_w = self.thumbs.width()
             self.thumbs.setVisible(False)
@@ -755,13 +824,16 @@ class MainWindow(QMainWindow):
             self._error(str(exc))
             self._refresh_ui()
             return
-        # Selection follows moved pages: new positions of previously selected
-        # After reorder, visual order already matches; keep current row selection
+        # The visual order already matches the document, but page content per
+        # index has changed (pages moved): drop cached renderings and refill.
+        self._thumb_cache.clear()
+        self._preview_cache.clear()
         self._update_title()
         self._update_actions_enabled()
         sel = self.thumbs.selected_indices()
         if sel:
             self._show_preview(sel[0])
+        self._schedule_fill()
         self.statusBar().showMessage("Pages reordered (unsaved)")
 
     def _on_about(self) -> None:

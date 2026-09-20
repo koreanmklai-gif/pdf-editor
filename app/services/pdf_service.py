@@ -20,6 +20,21 @@ class PdfError(Exception):
 
 
 @dataclass
+class RenderedPage:
+    """Raw RGB(A) pixel data of a rendered page (no PNG encoding).
+
+    `samples` is a contiguous buffer of `width * height * n` bytes where
+    `n` is the number of color components (3 for RGB, 4 for RGBA); the
+    UI layer builds images from it directly, avoiding a PNG round-trip.
+    """
+
+    samples: bytes
+    width: int
+    height: int
+    stride: int
+
+
+@dataclass
 class CropBox:
     """Crop margins in PDF points (1 pt = 1/72 inch), relative to media box."""
 
@@ -172,7 +187,32 @@ class PdfService:
         zoom: float = 1.5,
         max_side: Optional[int] = None,
     ) -> bytes:
-        """Render page to PNG bytes (RGBA)."""
+        """Render page to PNG bytes (RGB)."""
+        pix = self._render_pixmap(index, zoom=zoom, max_side=max_side)
+        return pix.tobytes("png")
+
+    def render_page_raw(
+        self,
+        index: int,
+        *,
+        zoom: float = 1.5,
+        max_side: Optional[int] = None,
+    ) -> RenderedPage:
+        """Render page to raw RGB bytes (no PNG encoding).
+
+        Much cheaper than :meth:`render_page` for hot paths such as
+        thumbnails and previews; the UI builds a QImage from the samples.
+        """
+        pix = self._render_pixmap(index, zoom=zoom, max_side=max_side)
+        return RenderedPage(
+            samples=bytes(pix.samples),
+            width=pix.width,
+            height=pix.height,
+            stride=pix.stride,
+        )
+
+    def _render_pixmap(self, index: int, *, zoom: float, max_side: Optional[int]) -> fitz.Pixmap:
+        """Shared render core: compute the zoom matrix and get the pixmap."""
         self._ensure_open()
         self._ensure_index(index)
         page = self._doc.load_page(index)  # type: ignore[union-attr]
@@ -183,8 +223,7 @@ class PdfService:
             if longest > max_side and longest > 0:
                 scale = max_side / longest
                 mat = fitz.Matrix(zoom * scale, zoom * scale)
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-        return pix.tobytes("png")
+        return page.get_pixmap(matrix=mat, alpha=False)
 
     def render_page_media_box(
         self,

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import io
+import logging
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
 import fitz  # PyMuPDF
+
+logger = logging.getLogger(__name__)
 
 
 class PdfError(Exception):
@@ -130,6 +133,23 @@ class PdfService:
         self._path = None
         self._dirty = False
 
+    def _save_incremental(self, target: Path) -> None:
+        """Append changed objects to the existing file (fast on large docs).
+
+        ``incremental=True`` requires the open document to be tied to the file
+        on disk (i.e. opened via :meth:`open`) — after an in-memory rebuild
+        (e.g. :meth:`merge_pdf` with ``insert_at``) it raises and the caller
+        falls back to a full rewrite. ``encryption=KEEP`` is required even for
+        unencrypted files, otherwise MuPDF rejects the incremental write.
+        """
+        doc = self._doc
+        assert doc is not None
+        doc.save(
+            str(target),
+            incremental=True,
+            encryption=fitz.PDF_ENCRYPT_KEEP,
+        )
+
     def save(self, path: Optional[Union[str, Path]] = None) -> Path:
         self._ensure_open()
         target = Path(path) if path is not None else self._path
@@ -139,11 +159,32 @@ class PdfService:
         target = Path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        # Saving over the currently open file requires incremental or temp dance.
         same_file = self._path is not None and target.resolve() == self._path.resolve()
+
+        if same_file and not self._dirty:
+            # Nothing changed: a no-op write to the same file would emit an
+            # empty incremental update, which MuPDF cannot parse back cleanly.
+            return target
+
+        if same_file:
+            # Stage 4b fast path: append only the changed bytes, so saving a
+            # huge file costs O(change) instead of O(file). Any failure (e.g.
+            # the in-memory doc isn't tied to the file after a merge) falls
+            # back to the full rewrite below.
+            try:
+                self._save_incremental(target)
+                self._dirty = False
+                return target
+            except PdfError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "Incremental save unavailable (%s); falling back to full rewrite", exc
+                )
+
+        # Full rewrite (temp + replace for the same file, plain write for new paths).
         try:
             if same_file:
-                # Write to temp then replace to avoid "cannot save to original"
                 with tempfile.NamedTemporaryFile(
                     suffix=".pdf", delete=False, dir=str(target.parent)
                 ) as tmp:

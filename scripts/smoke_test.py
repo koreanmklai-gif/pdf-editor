@@ -134,6 +134,52 @@ def main() -> int:
     assert out.exists() and out.stat().st_size > 0
     print(f"[OK] save_as {out} ({out.stat().st_size} bytes)")
 
+    # 9. Stage 4b — incremental save in place on a file-backed document.
+    inc = tmp / "incr.pdf"
+    isvc = PdfService()
+    isvc.create_blank_pdf(pages=4)
+    isvc.save(inc)
+    isvc.close()
+    before_size = inc.stat().st_size
+
+    isvc.open(inc)
+    isvc.delete_pages([0])
+    isvc.save()  # same path -> incremental fast path
+    assert_eq(isvc.page_count, 3)
+    chk = PdfService()
+    chk.open(inc)
+    assert_eq(chk.page_count, 3, "incremental-saved file corrupt?")
+    chk.close()
+    # A second incremental save, with a real modification in between, is valid.
+    isvc.delete_pages([0])
+    isvc.save()
+    chk = PdfService()
+    chk.open(inc)
+    assert_eq(chk.page_count, 2, "second incremental save corrupt?")
+    chk.close()
+    assert inc.stat().st_size >= before_size
+    print(
+        f"[OK] incremental save in place ({before_size} -> {inc.stat().st_size} bytes)",
+    )
+
+    # 9b. Fallback: after an in-memory rebuild (merge insert_at), saving to
+    # the same path must fall back to a full rewrite instead of failing.
+    before = isvc.page_count
+    other_inc = tmp / "other-incr.pdf"
+    oisvc = PdfService()
+    oisvc.create_blank_pdf(pages=2)
+    oisvc.save(other_inc)
+    oisvc.close()
+    isvc.merge_pdf(other_inc, insert_at=0)
+    isvc.save()  # same_file, but doc was rebuilt in memory -> full rewrite
+    chk = PdfService()
+    chk.open(inc)
+    assert_eq(chk.page_count, before + 2, "fallback rewrite corrupt?")
+    chk.close()
+    print(f"[OK] incremental fallback to full rewrite after merge -> {before + 2} pages")
+
+    isvc.close()
+
     # Error cases
     try:
         svc.open(tmp / "nope.pdf")

@@ -91,14 +91,21 @@ def main() -> int:
     total = _ms(t0, time.perf_counter())
     print(f"preview (raw):           {total:8.0f} ms  ({raw.width}x{raw.height})")
 
-    # 5. Page op + save on the open doc (full rewrite, temp+replace dance)
+    # 5. Page op + in-place save. With Stage 4b, svc.save() on a file-backed
+    # doc is an incremental append (fast); save_as() to a new path is a full
+    # rewrite (garbage collection + deflate).
     t0 = time.perf_counter()
     svc.delete_pages([0])
     print(f"delete one page:         {_ms(t0, time.perf_counter()):8.0f} ms")
 
     t0 = time.perf_counter()
     svc.save()
-    print(f"save (full rewrite):     {_ms(t0, time.perf_counter()):8.0f} ms  ({_fmt_mb(svc.path)})")
+    print(f"save in place (increm.): {_ms(t0, time.perf_counter()):8.0f} ms  ({_fmt_mb(svc.path)})")
+
+    t0 = time.perf_counter()
+    svc.delete_pages([0])
+    svc.save_as(tmp / "rewrite.pdf")
+    print(f"save_as (full rewrite):  {_ms(t0, time.perf_counter()):8.0f} ms")
 
     svc.close()
     print("\nDone.")

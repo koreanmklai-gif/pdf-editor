@@ -7,7 +7,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Slot
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -29,12 +29,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.services.pdf_service import CropBox, PdfError, PdfService
+from app.services.pdf_service import CropBox, PdfError, PdfService, RenderedPage
 from app.ui.crop_dialog import CropDialog
 from app.ui.delete_dialog import DeleteDialog
 from app.ui.extract_dialog import ExtractDialog
 from app.ui.merge_dialog import MergeDialog
 from app.ui.preview_label import PreviewLabel, PreviewScrollArea
+from app.ui.render_worker import RenderRequest, RenderWorker
 from app.ui.reorder_dialog import ReorderDialog
 from app.ui.rotate_dialog import RotateDialog
 from app.ui.scope_selector import resolve_scope
@@ -54,6 +55,22 @@ class MainWindow(QMainWindow):
         self._preview_index: int = 0
         self._thumb_cache_zoom = 0.35
         self._preview_zoom = 1.5
+
+        # Background renderer: pages render on a worker thread so dispatch is
+        # non-blocking and access to the shared fitz.Document is serialized
+        # against page ops (PyMuPDF still holds the GIL during a native
+        # render, so worst-case UI stalls are bounded by the render time).
+        # ``gen`` marks structural document changes (results from an older
+        # gen are dropped); ``nonce`` lets a new preview request supersede
+        # earlier in-flight ones.
+        self._doc_gen = 0
+        self._render_nonce = 0
+        self._inflight_thumbs: set[int] = set()
+        self._render_thread = QThread()
+        self._render_worker = RenderWorker(self.service)
+        self._render_worker.moveToThread(self._render_thread)
+        self._render_worker.result.connect(self._on_render_result)
+        self._render_thread.start()
         self._settings = QSettings()  # org "pdf-editor" / app "PDF Editor"
         self._sidebar_last_w = int(
             self._settings.value("sidebar/width", MIN_SIDEBAR_WIDTH, type=int)
@@ -322,6 +339,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_ui(self, *, keep_selection: Optional[List[int]] = None) -> None:
         if not self.service.is_open:
+            self._doc_gen += 1
+            self._inflight_thumbs.clear()
             if self._crop_dialog is not None:
                 self._crop_dialog.close()
             self._crop_dialog = None
@@ -339,7 +358,10 @@ class MainWindow(QMainWindow):
             self._update_actions_enabled()
             return
 
-        # Page indices/content may have shifted: drop cached renderings.
+        # Page indices/content may have shifted: drop cached renderings and bump
+        # the document generation so in-flight renders are discarded.
+        self._doc_gen += 1
+        self._inflight_thumbs.clear()
         self._thumb_cache.clear()
         self._preview_cache.clear()
         # Drops only apply in the empty, no-document state.
@@ -392,22 +414,87 @@ class MainWindow(QMainWindow):
         if cached is not None:
             self.thumbs.set_thumbnail(index, cached)
             return
-        try:
-            page = self.service.render_page_raw(
-                index, zoom=self._thumb_cache_zoom, max_side=160
+        if index in self._inflight_thumbs:
+            return  # already queued
+        self._inflight_thumbs.add(index)
+        self._request_render(
+            RenderRequest(
+                nonce=self._render_nonce,
+                gen=self._doc_gen,
+                index=index,
+                zoom=self._thumb_cache_zoom,
+                max_side=160,
+                kind="thumb",
             )
-        except Exception:  # noqa: BLE001
-            return  # keep the placeholder in place
-        img = QImage(
-            page.samples, page.width, page.height, page.stride,
-            QImage.Format.Format_RGB888,
         )
-        pix = QPixmap.fromImage(img)
+
+    def _request_render(self, req: RenderRequest) -> None:
+        self._render_worker.request.emit(req)
+
+    # ------------------------------------------------------------------
+    # Background render results (queued to the UI thread)
+    # ------------------------------------------------------------------
+
+    @Slot(object, object)
+    def _on_render_result(
+        self, req: RenderRequest, page: Optional[RenderedPage]
+    ) -> None:
+        if req.gen != self._doc_gen:
+            # The document changed while this render was in flight; drop it.
+            self._inflight_thumbs.discard(req.index)
+            return
+        if req.kind == "preview":
+            self._on_preview_result(req, page)
+        else:
+            self._on_thumb_result(req, page)
+
+    def _on_thumb_result(self, req: RenderRequest, page: Optional[RenderedPage]) -> None:
+        self._inflight_thumbs.discard(req.index)
+        if page is None:
+            return  # keep the placeholder in place
+        pix = self._pixmap_from_page(page)
+        key = (req.index, req.zoom)
         self._thumb_cache[key] = pix
         self._thumb_cache.move_to_end(key)
         while len(self._thumb_cache) > self._thumb_cache_max:
             self._thumb_cache.popitem(last=False)
-        self.thumbs.set_thumbnail(index, pix)
+        self.thumbs.set_thumbnail(req.index, pix)
+
+    def _on_preview_result(self, req: RenderRequest, page: Optional[RenderedPage]) -> None:
+        if req.index != self._preview_index or page is None:
+            # Superseded by a newer preview request, or the render failed.
+            if req.nonce == self._render_nonce and page is None:
+                self.preview_label.setText("Preview failed")
+            return
+        pix = self._pixmap_from_page(page)
+        key = (req.index, req.zoom)
+        self._preview_cache[key] = pix
+        self._preview_cache.move_to_end(key)
+        while len(self._preview_cache) > self._preview_cache_max:
+            self._preview_cache.popitem(last=False)
+        self._apply_preview_pixmap(req.index, pix)
+
+    @staticmethod
+    def _pixmap_from_page(page: RenderedPage) -> QPixmap:
+        img = QImage(
+            page.samples, page.width, page.height, page.stride,
+            QImage.Format.Format_RGB888,
+        )
+        return QPixmap.fromImage(img)
+
+    def _apply_preview_pixmap(self, index: int, pix: QPixmap) -> None:
+        if self._preview_index != index:
+            return
+        self.preview_label.setPixmap(pix)
+        self.preview_label.setText("")
+        self.preview_label.adjustSize()
+        # Re-apply an active crop overlay so it follows page/zoom changes.
+        if self._crop_overlay is not None and self.service.is_open:
+            try:
+                pw, ph = self.service.page_size(index)
+            except PdfError:
+                return
+            self.preview_label.set_crop_overlay(self._crop_overlay, pw, ph)
 
     def _show_preview(self, index: int) -> None:
         if not self.service.is_open:
@@ -419,34 +506,19 @@ class MainWindow(QMainWindow):
         cached = self._preview_cache.get(key)
         if cached is not None:
             self._preview_cache.move_to_end(key)
-            pix = cached
-        else:
-            try:
-                page = self.service.render_page_raw(
-                    index, zoom=self._preview_zoom, max_side=None
-                )
-                img = QImage(
-                    page.samples, page.width, page.height, page.stride,
-                    QImage.Format.Format_RGB888,
-                )
-                pix = QPixmap.fromImage(img)
-            except Exception as exc:  # noqa: BLE001
-                self.preview_label.setText(f"Preview failed: {exc}")
-                return
-            self._preview_cache[key] = pix
-            self._preview_cache.move_to_end(key)
-            while len(self._preview_cache) > self._preview_cache_max:
-                self._preview_cache.popitem(last=False)
-        self.preview_label.setPixmap(pix)
-        self.preview_label.setText("")
-        self.preview_label.adjustSize()
-        # Re-apply an active crop overlay so it follows page/zoom changes.
-        if self._crop_overlay is not None and self.service.is_open:
-            try:
-                pw, ph = self.service.page_size(index)
-            except PdfError:
-                return
-            self.preview_label.set_crop_overlay(self._crop_overlay, pw, ph)
+            self._apply_preview_pixmap(index, cached)
+            return
+        self._render_nonce += 1
+        self._request_render(
+            RenderRequest(
+                nonce=self._render_nonce,
+                gen=self._doc_gen,
+                index=index,
+                zoom=self._preview_zoom,
+                max_side=None,
+                kind="preview",
+            )
+        )
 
     # ------------------------------------------------------------------
     # Zoom + sidebar
@@ -865,6 +937,8 @@ class MainWindow(QMainWindow):
             return
         # The visual order already matches the document, but page content per
         # index has changed (pages moved): drop cached renderings and refill.
+        self._doc_gen += 1
+        self._inflight_thumbs.clear()
         self._thumb_cache.clear()
         self._preview_cache.clear()
         self._update_title()
@@ -888,6 +962,10 @@ class MainWindow(QMainWindow):
         if self._maybe_save_before_close():
             self._sidebar_last_w = self.thumbs.width()
             self.save_sidebar_width()
+            # Stop the background renderer before closing the document under
+            # it, so no thread touches a half-closed fitz.Document.
+            self._render_thread.quit()
+            self._render_thread.wait(3000)
             self.service.close()
             event.accept()
         else:

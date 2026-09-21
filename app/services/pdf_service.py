@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import io
 import logging
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
@@ -12,6 +14,25 @@ from typing import Iterable, List, Optional, Sequence, Tuple, Union
 import fitz  # PyMuPDF
 
 logger = logging.getLogger(__name__)
+
+
+def _synchronized(method: object) -> object:
+    """Serialize document access across threads.
+
+    PyMuPDF documents are not thread-safe. The background render worker and
+    the UI thread both touch the document, so every document-touching entry
+    point takes the same reentrant lock (safe for nested calls within one
+    thread). ``is_open``/``page_count`` are deliberately lock-free mirrors
+    (see ``__init__``) so the UI thread can bounds-check without waiting on
+    a render in flight.
+    """
+
+    @functools.wraps(method)  # type: ignore[arg-type]
+    def wrapper(self: "PdfService", *args: object, **kwargs: object) -> object:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class PdfError(Exception):
@@ -61,9 +82,18 @@ class PdfService:
     """In-memory PDF document with undo-friendly page ops and rendering."""
 
     def __init__(self) -> None:
+        self._lock: threading.RLock = threading.RLock()
         self._doc: Optional[fitz.Document] = None
         self._path: Optional[Path] = None
         self._dirty: bool = False
+        # Lock-free mirrors of document state, refreshed under ``_lock``.
+        # They let the UI thread do cheap bounds checks without contending
+        # with a long background render (which holds the lock). They are
+        # only ever written by the main thread (which also owns the lock
+        # when writing), so reads from the GUI and worker threads are safe
+        # and always current.
+        self._is_open: bool = False
+        self._page_count: int = 0
 
     # ------------------------------------------------------------------
     # Properties
@@ -71,7 +101,7 @@ class PdfService:
 
     @property
     def is_open(self) -> bool:
-        return self._doc is not None and not self._doc.is_closed
+        return self._is_open
 
     @property
     def path(self) -> Optional[Path]:
@@ -83,22 +113,30 @@ class PdfService:
 
     @property
     def page_count(self) -> int:
-        self._ensure_open()
-        return self._doc.page_count  # type: ignore[union-attr]
+        return self._page_count
 
     def mark_dirty(self, value: bool = True) -> None:
         self._dirty = value
+
+    def _refresh_page_count(self) -> None:
+        """Re-sync the lock-free page-count mirror. Caller holds ``_lock``."""
+        if self._doc is not None and not self._doc.is_closed:
+            self._page_count = int(self._doc.page_count)
 
     # ------------------------------------------------------------------
     # Open / close / save
     # ------------------------------------------------------------------
 
+    @_synchronized
     def new_empty(self) -> None:
         self.close()
         self._doc = fitz.open()
         self._path = None
         self._dirty = True
+        self._is_open = True
+        self._page_count = 0
 
+    @_synchronized
     def open(self, path: Union[str, Path], password: str = "") -> None:
         path = Path(path)
         if not path.exists():
@@ -125,13 +163,18 @@ class PdfService:
         self._doc = doc
         self._path = path
         self._dirty = False
+        self._is_open = True
+        self._page_count = int(doc.page_count)
 
+    @_synchronized
     def close(self) -> None:
         if self._doc is not None and not self._doc.is_closed:
             self._doc.close()
         self._doc = None
         self._path = None
         self._dirty = False
+        self._is_open = False
+        self._page_count = 0
 
     def _save_incremental(self, target: Path) -> None:
         """Append changed objects to the existing file (fast on large docs).
@@ -150,6 +193,7 @@ class PdfService:
             encryption=fitz.PDF_ENCRYPT_KEEP,
         )
 
+    @_synchronized
     def save(self, path: Optional[Union[str, Path]] = None) -> Path:
         self._ensure_open()
         target = Path(path) if path is not None else self._path
@@ -221,6 +265,7 @@ class PdfService:
     # Rendering
     # ------------------------------------------------------------------
 
+    @_synchronized
     def render_page(
         self,
         index: int,
@@ -232,6 +277,7 @@ class PdfService:
         pix = self._render_pixmap(index, zoom=zoom, max_side=max_side)
         return pix.tobytes("png")
 
+    @_synchronized
     def render_page_raw(
         self,
         index: int,
@@ -252,6 +298,7 @@ class PdfService:
             stride=pix.stride,
         )
 
+    @_synchronized
     def _render_pixmap(self, index: int, *, zoom: float, max_side: Optional[int]) -> fitz.Pixmap:
         """Shared render core: compute the zoom matrix and get the pixmap."""
         self._ensure_open()
@@ -266,6 +313,7 @@ class PdfService:
                 mat = fitz.Matrix(zoom * scale, zoom * scale)
         return page.get_pixmap(matrix=mat, alpha=False)
 
+    @_synchronized
     def render_page_media_box(
         self,
         index: int,
@@ -302,12 +350,14 @@ class PdfService:
                 page.set_rotation(saved_rotation)
             page.set_cropbox(saved_crop)
 
+    @_synchronized
     def page_size(self, index: int) -> Tuple[float, float]:
         self._ensure_open()
         self._ensure_index(index)
         r = self._doc.load_page(index).rect  # type: ignore[union-attr]
         return float(r.width), float(r.height)
 
+    @_synchronized
     def page_media_size(self, index: int) -> Tuple[float, float]:
         """Return the page's media box size in points (unrotated)."""
         self._ensure_open()
@@ -315,6 +365,7 @@ class PdfService:
         r = self._doc.load_page(index).mediabox  # type: ignore[union-attr]
         return float(r.width), float(r.height)
 
+    @_synchronized
     def page_cropbox(self, index: int) -> CropBox:
         """Return the page's current crop as margin values (relative to media box)."""
         self._ensure_open()
@@ -333,6 +384,7 @@ class PdfService:
     # Page operations
     # ------------------------------------------------------------------
 
+    @_synchronized
     def delete_pages(self, indices: Sequence[int]) -> None:
         self._ensure_open()
         if not indices:
@@ -345,7 +397,9 @@ class PdfService:
         # PyMuPDF delete_pages accepts a list (descending is safer for some versions)
         self._doc.delete_pages(unique)  # type: ignore[union-attr]
         self._dirty = True
+        self._refresh_page_count()
 
+    @_synchronized
     def crop_pages(self, indices: Sequence[int], crop: CropBox) -> None:
         self._ensure_open()
         for i in sorted({int(x) for x in indices}):
@@ -354,7 +408,9 @@ class PdfService:
             rect = crop.as_rect(page)
             page.set_cropbox(rect)
         self._dirty = True
+        self._refresh_page_count()
 
+    @_synchronized
     def rotate_pages(self, indices: Sequence[int], degrees: int) -> None:
         self._ensure_open()
         if degrees % 90 != 0:
@@ -364,7 +420,9 @@ class PdfService:
             page = self._doc.load_page(i)  # type: ignore[union-attr]
             page.set_rotation((page.rotation + degrees) % 360)
         self._dirty = True
+        self._refresh_page_count()
 
+    @_synchronized
     def extract_pages(self, indices: Sequence[int], dest: Union[str, Path]) -> Path:
         self._ensure_open()
         if not indices:
@@ -387,6 +445,7 @@ class PdfService:
             raise PdfError(f"Export failed: {exc}", cause=exc) from exc
         return dest
 
+    @_synchronized
     def merge_pdf(
         self,
         other_path: Union[str, Path],
@@ -443,7 +502,9 @@ class PdfService:
             other.close()
 
         self._dirty = True
+        self._refresh_page_count()
 
+    @_synchronized
     def reorder_pages(self, new_order: Sequence[int]) -> None:
         """Reorder pages. new_order is a permutation of 0..n-1."""
         self._ensure_open()
@@ -465,7 +526,9 @@ class PdfService:
             self._doc = new_doc
             # keep path
         self._dirty = True
+        self._refresh_page_count()
 
+    @_synchronized
     def move_page(self, from_index: int, to_index: int) -> None:
         """Move a single page from from_index to to_index (0-based)."""
         self._ensure_open()
@@ -480,6 +543,7 @@ class PdfService:
         order.insert(to_index, item)
         self.reorder_pages(order)
 
+    @_synchronized
     def move_pages_up(self, indices: Sequence[int]) -> List[int]:
         """Move selected pages one step toward the start. Returns new selection."""
         self._ensure_open()
@@ -506,6 +570,7 @@ class PdfService:
         # Original page `i` is now at position where order[pos] == i, i.e. order.index(i)
         return sorted(new_sel)
 
+    @_synchronized
     def move_pages_down(self, indices: Sequence[int]) -> List[int]:
         self._ensure_open()
         selected = sorted({int(i) for i in indices}, reverse=True)
@@ -524,6 +589,7 @@ class PdfService:
         new_sel = [order.index(i) for i in sorted(set(indices))]
         return sorted(new_sel)
 
+    @_synchronized
     def create_blank_pdf(
         self,
         pages: int = 3,
@@ -555,6 +621,8 @@ class PdfService:
         self._doc = doc
         self._path = None
         self._dirty = True
+        self._is_open = True
+        self._refresh_page_count()
 
     # ------------------------------------------------------------------
     # Internals

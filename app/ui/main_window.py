@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -38,6 +39,8 @@ from app.ui.reorder_dialog import ReorderDialog
 from app.ui.rotate_dialog import RotateDialog
 from app.ui.scope_selector import resolve_scope
 from app.ui.thumbnail_list import MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, ThumbnailList
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -691,8 +694,12 @@ class MainWindow(QMainWindow):
         pix = QPixmap()
         try:
             data = self.service.render_page_media_box(idx, zoom=0.8, max_side=520)
-            pix.loadFromData(QByteArray(data), "PNG")
-        except Exception:  # noqa: BLE001
+            # QPixmap.loadFromData accepts raw PNG bytes directly.
+            pix.loadFromData(data, "PNG")
+        except Exception as exc:  # noqa: BLE001
+            # Keep the dialog usable even if rendering fails, but never hide
+            # the failure: the preview must not silently go blank.
+            logger.warning("Crop preview render failed for page %d: %s", idx + 1, exc)
             pix = QPixmap()
         try:
             box = self.service.page_cropbox(idx)
